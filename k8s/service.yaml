@@ -1,0 +1,22 @@
+# This Service gives the flask-app Pods a stable network address inside the cluster.
+# Pods come and go (get recreated with new IPs), but the Service's address stays fixed,
+# so other things inside the cluster always have one reliable way to reach the app.
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-app-service
+spec:
+  # This selector must match the labels set on the Pods (see deployment.yaml
+  # template.metadata.labels). It tells the Service which Pods to send traffic to.
+  selector:
+    app: flask-app
+
+  ports:
+    # Port other things inside the cluster will use to reach this Service
+    - port: 80
+      # Port the Service forwards traffic to, matching containerPort in deployment.yaml
+      targetPort: 5000
+
+  # ClusterIP means this Service is only reachable from inside the cluster.
+  # We'll use "kubectl port-forward" to reach it from our own machine for testing.
+  type: ClusterIP
