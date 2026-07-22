@@ -1,0 +1,51 @@
+# This Deployment tells Kubernetes how to run our Flask app (built in v1).
+# "Deployment" is a Kubernetes resource type that manages a set of identical Pods,
+# keeping the desired number running and replacing any that crash (self-healing).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Name of this Deployment object inside the cluster
+  name: flask-app
+spec:
+  # We want 2 copies of the app running at all times
+  replicas: 2
+
+  # This selector tells the Deployment which Pods belong to it,
+  # by matching the label defined below under template.metadata.labels
+  selector:
+    matchLabels:
+      app: flask-app
+
+  # This is the "template" used to create each Pod (each of the 2 replicas)
+  template:
+    metadata:
+      labels:
+        # Every Pod created from this template gets this label.
+        # The Service (next file) will use this same label to find these Pods.
+        app: flask-app
+    spec:
+      containers:
+        - name: flask-app
+          # Same image we built and tested with Docker in v1
+          image: devops-cicd-pipeline:v1.0.0
+          ports:
+            # Port the Flask app listens on inside the container
+            - containerPort: 5000
+
+          # Kubernetes calls GET /health every 10 seconds.
+          # If it fails, Kubernetes assumes this Pod is broken and restarts it.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          # Similar check, but decides whether this Pod is ready
+          # to receive traffic from the Service (not whether to restart it).
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
