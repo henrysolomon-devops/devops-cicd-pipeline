@@ -1,0 +1,20 @@
+# Service for the Flask app, generated from Helm templates.
+# This is the Helm equivalent of v2's k8s/service.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devops-pipeline.fullname" . }}
+  labels:
+    {{- include "devops-pipeline.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      # "http" here refers to the named port defined in deployment.yaml
+      # (containerPort: {{ .Values.service.targetPort }}, i.e. 5000),
+      # not a literal port number. Kubernetes resolves the name automatically.
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "devops-pipeline.selectorLabels" . | nindent 4 }}
