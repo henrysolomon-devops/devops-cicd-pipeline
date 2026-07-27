@@ -12,9 +12,12 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: {}  # Temporary - lets us trigger this manually from
-                          # the Actions tab for testing, before merging to
-                          # main. Will be removed once everything's confirmed working.
+      - feature/v4-github-actions  # Temporary - lets the workflow actually
+                                     # trigger on this branch for testing,
+                                     # since workflow_dispatch only works
+                                     # once a workflow is on the default
+                                     # branch. Will be removed before merge.
+  workflow_dispatch: {}  # Kept for potential future manual runs on main                          # main. Will be removed once everything's confirmed working.
 
 env:
   # Using the commit SHA as the image tag (instead of "latest") so we
