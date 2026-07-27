@@ -1,0 +1,7 @@
+# Overrides for the "production" environment.
+# Only fields that differ from values.yaml need to be listed here;
+# everything else is inherited from the base values.yaml.
+
+# Higher replica count in production: the live environment needs
+# more headroom to tolerate a Pod crashing without losing capacity.
+replicaCount: 3
