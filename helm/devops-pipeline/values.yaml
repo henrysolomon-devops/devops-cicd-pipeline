@@ -18,6 +18,12 @@ image:
   # so the image version used is obvious directly from this file.
   tag: "v1.0.0"
 
+# The environment name shown on the dashboard and reported back by
+# /api/status - dev, staging, or production. The base value here is just
+# a fallback; each per-environment values file below overrides it so the
+# running Pod actually knows which namespace it's living in.
+appEnv: "unknown"
+
 # No private registry is used yet, so no pull secrets are needed.
 imagePullSecrets: []
 nameOverride: ""

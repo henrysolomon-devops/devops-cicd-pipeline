@@ -39,12 +39,20 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+
           # Same Docker image built and tested in v1
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Passing the app version and environment name in as env vars,
+          # instead of hardcoding them in the image, so the same image can
+          # be reused across dev, staging, and production - only the
+          # values file changes, not the code or the container.
+          env:
+            - name: APP_VERSION
+              value: "{{ .Values.image.tag | default .Chart.AppVersion }}"
+            - name: APP_ENV
+              value: "{{ .Values.appEnv }}"
           ports:
-            # This must be the container's actual listening port (5000, from
-            # values.yaml service.targetPort), not the Service's external port (80).
             - name: http
               containerPort: {{ .Values.service.targetPort }}
               protocol: TCP

@@ -5,3 +5,7 @@
 # Same replica count as the base default: staging should mirror
 # production closely enough to catch issues before release.
 replicaCount: 2
+
+# Reported by the app so the dashboard clearly shows "production" when
+# you're looking at this namespace.
+appEnv: "staging"

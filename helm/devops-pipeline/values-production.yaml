@@ -5,3 +5,7 @@
 # Higher replica count in production: the live environment needs
 # more headroom to tolerate a Pod crashing without losing capacity.
 replicaCount: 3
+
+# Reported by the app so the dashboard clearly shows "staging" when
+# you're looking at this namespace.
+appEnv: "production"
