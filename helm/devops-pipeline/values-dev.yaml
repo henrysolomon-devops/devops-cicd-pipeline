@@ -5,3 +5,7 @@
 # Lower replica count in dev: fast iteration and lower resource usage
 # matter more than high availability while actively developing.
 replicaCount: 1
+
+# Reported by the app so the dashboard clearly shows "dev" when you're
+# looking at this namespace.
+appEnv: "dev"
