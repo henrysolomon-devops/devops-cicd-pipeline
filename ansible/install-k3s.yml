@@ -1,0 +1,35 @@
+---
+# Installs k3s on the EC2 instance Terraform just created. k3s ships its
+# own install script that handles the binary, the systemd service, and
+# the internal networking in one shot - way less moving parts than a
+# full kubeadm-based Kubernetes install.
+- name: Install k3s on the pipeline server
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Update the apt package cache
+      apt:
+        update_cache: true
+
+    - name: Download and run the official k3s install script
+      shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--tls-san {{ tls_san }}" sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Wait for the k3s service to be active
+      systemd:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Wait until the node reports Ready
+      shell: k3s kubectl get nodes
+      register: node_status
+      until: "'Ready' in node_status.stdout"
+      retries: 10
+      delay: 5
+
+    - name: Show the node status
+      debug:
+        var: node_status.stdout_lines
