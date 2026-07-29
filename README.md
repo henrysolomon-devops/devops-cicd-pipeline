@@ -12,7 +12,8 @@ The goal isn't just to run the commands, but to understand why each tool is used
 | v2.0 | Kubernetes (`kind`) + dev/staging/production namespaces | Orchestration, environment isolation | ✅ Done |
 | v3.0 | Helm chart | Package management for Kubernetes | ✅ Done |
 | v4.0 | GitHub Actions (branch-based deploy) | CI/CD pipeline | ✅ Done |
-| v5.0 | Terraform (EC2 + VPC) + Ansible (k3s install) | Infrastructure as Code, Configuration Management | 🔜 Next |
+| v5.0 | Terraform (EC2 + VPC) + Ansible (k3s install) | Infrastructure as Code, Configuration Management | ✅ Done |
+| v5.1 | GitHub Actions deploy to the v5 EC2/k3s server | Extending existing CI/CD to a real cloud target | 🔜 Next |
 | v6.0 | ArgoCD | GitOps-based Continuous Deployment | ⏳ Planned |
 | v7.0 | Jenkins pipeline (alternative to Actions) | Alternative CI tooling | ⏳ Planned |
 | v8.0 | Prometheus + Grafana | Observability & monitoring | ⏳ Planned |
@@ -27,8 +28,8 @@ Each tool gets its own folder at the repo root, added as the version that introd
     ├── docker/      # Dockerfile + .dockerignore (v1)
     ├── helm/        # Helm chart (v3, replaces the old k8s/ manifests from v2)
     ├── .github/     # GitHub Actions workflows (v4)
-    ├── terraform/   # Infrastructure as Code (v5, not yet added)
-    ├── ansible/     # Configuration management (v5, not yet added)
+    ├── terraform/   # Infrastructure as Code (v5)
+    ├── ansible/     # Configuration management (v5)
     ├── argocd/      # GitOps application definitions (v6, not yet added)
     ├── jenkins/     # Jenkins pipeline (v7, not yet added)
     ├── monitoring/  # Prometheus + Grafana configs (v8, not yet added)
@@ -57,6 +58,12 @@ The raw Kubernetes manifests from v2 were rewritten as a Helm chart, with per-en
 A self-hosted GitHub Actions runner, installed directly on the same Linux machine that runs the kind cluster, so workflows can reach it the same way `kubectl` and `helm` already do locally. Every push to `main` builds a fresh image, pushes it to GitHub Container Registry (ghcr.io - our first use of it, since kind no longer needs it), and rolls it out to dev, staging, and production in that order. Staging and production each require a manual approval, using GitHub Environments, before the rollout proceeds - so nothing reaches production without a human actually checking it first. Also adds an `APP_ENV` variable to the app itself, so the dashboard shows which environment actually answered the request.
 
 📄 [Full guide: setup, testing, and reasoning](./docs/v4-github-actions.md)
+
+## v5: Terraform (VPC + EC2) + Ansible (k3s install)
+
+Infrastructure moves off the local machine for the first time: Terraform provisions a VPC, subnet, and EC2 instance on AWS with a static Elastic IP, and Ansible installs k3s — a lightweight Kubernetes distribution well-suited to a single server — on top of it. A helper script (`ansible/deploy-k3s.sh`) reads the server's IP straight from Terraform's output and handles the k3s install, TLS configuration, and kubeconfig retrieval in one step. The existing v3 Helm chart deploys cleanly onto this cluster, pulling the image already published to GitHub Container Registry by the v4 pipeline — confirming the infrastructure is genuinely usable, not just reachable. Following the project's cost and safety rules, the server only runs for testing and is torn down afterward with `terraform destroy`.
+
+📄 [Full guide: setup, testing, and reasoning](./docs/v5-terraform-ansible.md)
 
 ## License
 
