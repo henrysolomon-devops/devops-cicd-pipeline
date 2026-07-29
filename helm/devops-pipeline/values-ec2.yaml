@@ -1,0 +1,10 @@
+# Override just for testing on the EC2/k3s cluster from v5. Unlike kind,
+# this cluster can't load a local image directly - it has to pull from
+# a real registry, so this points at the image already pushed to ghcr.io
+# back in v4.
+image:
+  repository: ghcr.io/henrysolomon-devops/devops-cicd-pipeline
+  tag: "fd8b5de35eee15e8b9037ee12aa104bdaec35db5"
+
+appEnv: "ec2-test"
+replicaCount: 1
