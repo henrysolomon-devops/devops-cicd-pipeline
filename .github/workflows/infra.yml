@@ -94,6 +94,14 @@ jobs:
             --protocol tcp --port 22 \
             --cidr ${{ steps.runner_ip.outputs.cidr }}
 
+      - name: Temporarily let this runner reach the k3s API too
+        if: inputs.action == 'apply'
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ steps.sg.outputs.id }} \
+            --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
+
       - name: Write out the SSH private key so Ansible can use it
         if: inputs.action == 'apply'
         run: |
@@ -122,12 +130,16 @@ jobs:
           KUBECONFIG_B64=$(base64 -w 0 ~/.kube/devops-pipeline-config)
           gh secret set KUBECONFIG_B64 --body "$KUBECONFIG_B64"
 
-      - name: Take the temporary SSH access back out
+      - name: Take the temporary SSH and API access back out
         if: always() && inputs.action == 'apply'
         run: |
           aws ec2 revoke-security-group-ingress \
             --group-id ${{ steps.sg.outputs.id }} \
             --protocol tcp --port 22 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ steps.sg.outputs.id }} \
+            --protocol tcp --port 6443 \
             --cidr ${{ steps.runner_ip.outputs.cidr }} || true
 
       # ---------- destroy path ----------
