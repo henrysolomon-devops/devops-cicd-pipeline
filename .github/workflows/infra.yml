@@ -56,6 +56,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ansible
 
+      - name: Write out the SSH public key so Terraform can import it
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ vars.SSH_PUBLIC_KEY }}" > ~/.ssh/devops-pipeline-key.pub
+
       - name: Terraform init
         run: terraform init
 
