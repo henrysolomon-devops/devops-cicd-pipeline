@@ -1,10 +1,16 @@
 # This workflow handles the full CI/CD flow for the project.
 # Every push to main builds a fresh image, pushes it to GitHub Container
-# Registry, and then rolls it out to dev, staging, and production in
-# that order - one after another, never all at once. Staging and
-# production both require a manual approval before they proceed, since
-# those are the environments we don't want to touch without a human
-# actually checking things first.
+# Registry, and then rolls it out to dev, staging, and production - one
+# after another, never all at once, all on the same EC2/k3s server set
+# up by infra.yml. There's a manual gate right after the build (to
+# confirm the AWS server is actually up before anything tries to reach
+# it), and staging and production each get their own separate approval
+# on top of that.
+#
+# Since v5.1, everything here runs on GitHub-hosted runners rather than
+# the self-hosted one - there's no local kind cluster left to reach, so
+# there's no reason for any of this to depend on my own machine being
+# on.
 
 name: Build and Deploy
 
@@ -12,33 +18,29 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: {}  # Lets us re-run the whole pipeline manually from
-                          # the Actions tab whenever needed, without having
-                          # to push a new commit just to trigger it. 
+  workflow_dispatch: {}
 
 env:
-  # Using the commit SHA as the image tag (instead of "latest") so we
-  # always know exactly which commit is running in each environment.
   IMAGE_NAME: ghcr.io/henrysolomon-devops/devops-cicd-pipeline
 
 jobs:
   build:
-    # This job only builds and pushes the image - it doesn't touch
-    # Kubernetes at all. Keeping it separate from deployment makes it
-    # easier to tell, at a glance, whether a failure was a build
-    # problem or a deployment problem.
-    runs-on: self-hosted
+    # Just builds and pushes the image - doesn't touch Kubernetes at
+    # all, so a build problem and a deployment problem are always easy
+    # to tell apart at a glance.
+    runs-on: ubuntu-latest
 
     permissions:
       contents: read
       packages: write
 
+    outputs:
+      image_tag: ${{ github.sha }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # GITHUB_TOKEN is created automatically for every run, so there's
-      # no need to store a separate secret just to log in to ghcr.io.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -54,63 +56,227 @@ jobs:
         run: |
           docker push $IMAGE_NAME:${{ github.sha }}
 
-  deploy-dev:
-    # Dev has no protection rules, so this runs immediately after the
-    # build finishes - no approval needed, since this is just an early
-    # testing environment.
+  # Doesn't do anything by itself - just sits here and waits for me to
+  # confirm, through the infra-check environment, that I've actually
+  # run infra.yml and the AWS server is up before anything tries to
+  # deploy onto it.
+  infra-check:
     needs: build
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    environment: infra-check
+
+    steps:
+      - name: Confirmed - infrastructure is up
+        run: echo "Proceeding, infrastructure has been confirmed ready."
+
+  deploy-dev:
+    # No protection rules on dev, so this runs immediately once
+    # infra-check clears - no separate approval needed here.
+    needs: infra-check
+    runs-on: ubuntu-latest
     environment: dev
+    env:
+      NAMESPACE: dev
+      APP_PORT: 5000
+
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Configure kubectl for the remote k3s server
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Figure out this runner's own public IP
+        id: runner_ip
+        run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
+
+      - name: Get temporary AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::578254188866:role/github-actions-terraform-role
+          aws-region: us-east-1
+
+      - name: Temporarily open this environment's app port for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port ${{ env.APP_PORT }} \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
+
+      - name: Temporarily open the k3s API for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
 
       - name: Deploy to dev namespace
         run: |
           helm upgrade --install devops-pipeline helm/devops-pipeline \
             -f helm/devops-pipeline/values-dev.yaml \
             --set image.repository=$IMAGE_NAME \
-            --set image.tag=${{ github.sha }} \
-            -n dev
+            --set image.tag=${{ needs.build.outputs.image_tag }} \
+            -n ${{ env.NAMESPACE }}
+
+      - name: Close the temporary access back up
+        if: always()
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port ${{ env.APP_PORT }} \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
 
   deploy-staging:
-    # This is where the workflow pauses and waits for a manual
-    # approval, since staging has a required reviewer set up. Nothing
-    # happens here until that approval is given in the Actions tab.
+    # This is where the workflow pauses for a manual approval, since
+    # staging has a required reviewer set up in its environment.
     needs: deploy-dev
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     environment: staging
+    env:
+      NAMESPACE: staging
+      APP_PORT: 5001
+
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Configure kubectl for the remote k3s server
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Figure out this runner's own public IP
+        id: runner_ip
+        run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
+
+      - name: Get temporary AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::578254188866:role/github-actions-terraform-role
+          aws-region: us-east-1
+
+      - name: Temporarily open this environment's app port for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port ${{ env.APP_PORT }} \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
+
+      - name: Temporarily open the k3s API for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
 
       - name: Deploy to staging namespace
         run: |
           helm upgrade --install devops-pipeline helm/devops-pipeline \
             -f helm/devops-pipeline/values-staging.yaml \
             --set image.repository=$IMAGE_NAME \
-            --set image.tag=${{ github.sha }} \
-            -n staging
+            --set image.tag=${{ needs.build.outputs.image_tag }} \
+            -n ${{ env.NAMESPACE }}
+
+      - name: Close the temporary access back up
+        if: always()
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port ${{ env.APP_PORT }} \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
 
   deploy-production:
-    # Same idea as staging - this waits for its own separate approval
-    # before touching the production namespace. Two approvals in a row
-    # (staging, then production) means there are two real chances to
-    # catch a problem before it reaches the live version.
+    # Same idea as staging - its own separate approval before touching
+    # the production namespace. Two approvals in a row (staging, then
+    # production) means two real chances to catch a problem before it
+    # reaches the live version.
     needs: deploy-staging
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     environment: production
+    env:
+      NAMESPACE: production
+      APP_PORT: 5002
+
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Configure kubectl for the remote k3s server
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Figure out this runner's own public IP
+        id: runner_ip
+        run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
+
+      - name: Get temporary AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::578254188866:role/github-actions-terraform-role
+          aws-region: us-east-1
+
+      - name: Temporarily open this environment's app port for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port ${{ env.APP_PORT }} \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
+
+      - name: Temporarily open the k3s API for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
 
       - name: Deploy to production namespace
         run: |
           helm upgrade --install devops-pipeline helm/devops-pipeline \
             -f helm/devops-pipeline/values-production.yaml \
             --set image.repository=$IMAGE_NAME \
-            --set image.tag=${{ github.sha }} \
-            -n production
+            --set image.tag=${{ needs.build.outputs.image_tag }} \
+            -n ${{ env.NAMESPACE }}
+
+      - name: Close the temporary access back up
+        if: always()
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port ${{ env.APP_PORT }} \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ vars.SECURITY_GROUP_ID }} \
+            --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true

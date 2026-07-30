@@ -1,0 +1,124 @@
+name: Infrastructure (Terraform + Ansible)
+
+# This one's manual on purpose - it touches real AWS money, so it
+# should never fire on its own just because someone pushed to main.
+# I run it by hand, pick apply or destroy, and approve it myself
+# through the aws-infra environment before anything actually happens.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What do you want to do with the AWS infrastructure?"
+        required: true
+        type: choice
+        options:
+          - apply
+          - destroy
+
+# Needed so this workflow can request a short-lived OIDC token from
+# GitHub and hand it to AWS instead of using a stored access key.
+permissions:
+  id-token: write
+  contents: read
+
+# Just a safety net so two runs of this can't step on each other's
+# feet if I accidentally kick it off twice.
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+jobs:
+  infra:
+    runs-on: ubuntu-latest
+    environment: aws-infra
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+
+      - name: Get temporary AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::578254188866:role/github-actions-terraform-role
+          aws-region: us-east-1
+
+      - name: Install Ansible
+        if: inputs.action == 'apply'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+
+      - name: Terraform init
+        run: terraform init
+
+      # ---------- apply path ----------
+
+      - name: Terraform apply
+        if: inputs.action == 'apply'
+        run: terraform apply -auto-approve -var="my_ip=${{ vars.MY_IP }}"
+
+      - name: Look up the security group this run needs to touch
+        if: inputs.action == 'apply'
+        id: sg
+        run: echo "id=$(terraform output -raw security_group_id)" >> "$GITHUB_OUTPUT"
+
+      - name: Save the security group ID for deploy.yml to use later
+        if: inputs.action == 'apply'
+        env:
+          GH_TOKEN: ${{ secrets.ADMIN_PAT }}
+        run: gh variable set SECURITY_GROUP_ID --body "${{ steps.sg.outputs.id }}"
+
+      - name: Figure out this runner's own public IP
+        if: inputs.action == 'apply'
+        id: runner_ip
+        run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
+
+      - name: Temporarily let this runner SSH in, just long enough for Ansible
+        if: inputs.action == 'apply'
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ steps.sg.outputs.id }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
+
+      - name: Write out the SSH private key so Ansible can use it
+        if: inputs.action == 'apply'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/devops-pipeline-key
+          chmod 600 ~/.ssh/devops-pipeline-key
+
+      - name: Run the Ansible playbook to install k3s
+        if: inputs.action == 'apply'
+        working-directory: ansible
+        run: ./deploy-k3s.sh
+
+      - name: Save the freshly generated kubeconfig as a repo secret
+        if: inputs.action == 'apply'
+        env:
+          GH_TOKEN: ${{ secrets.ADMIN_PAT }}
+        run: |
+          KUBECONFIG_B64=$(base64 -w 0 ~/.kube/devops-pipeline-config)
+          gh secret set KUBECONFIG_B64 --body "$KUBECONFIG_B64"
+
+      - name: Take the temporary SSH access back out
+        if: always() && inputs.action == 'apply'
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ steps.sg.outputs.id }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
+
+      # ---------- destroy path ----------
+
+      - name: Terraform destroy
+        if: inputs.action == 'destroy'
+        run: terraform destroy -auto-approve -var="my_ip=${{ vars.MY_IP }}"
