@@ -1,11 +1,7 @@
-# security.tf
-
-# variable "my_ip" is already declared in variables.tf - reused here,
-# not redeclared.
-
 resource "aws_security_group" "server" {
   name        = "devops-pipeline-sg"
   description = "Security group for the EC2/k3s server - SSH is locked to me, everything else starts closed and opens only for the length of a workflow run"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     description = "SSH, only from my own machine"
@@ -32,9 +28,6 @@ resource "aws_security_group" "server" {
   }
 }
 
-# Exposed so the workflows know exactly which security group to add
-# and remove their temporary rules from, without having to hardcode
-# or look up the ID by hand.
 output "security_group_id" {
   value = aws_security_group.server.id
 }
