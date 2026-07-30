@@ -1,6 +1,6 @@
 resource "aws_security_group" "server" {
   name        = "devops-pipeline-sg"
-  description = "Security group for the EC2/k3s server - SSH and app ports are always open for me, GitHub's runners get temporary access per workflow run"
+  description = "Security group for the EC2/k3s server - SSH and app ports are always open for me, GitHub runners get temporary access per workflow run"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -11,7 +11,7 @@ resource "aws_security_group" "server" {
     cidr_blocks = [var.my_ip]
   }
 
-  # Always open for my own machine so I can check the app in a browser or run
+  # Always open for me so I can check the app in a browser or run
   # kubectl manually anytime, without waiting for a workflow run to
   # temporarily open a port first. This survives every destroy/apply
   # cycle, unlike the manual console rule I kept losing.
