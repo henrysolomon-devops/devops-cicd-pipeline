@@ -9,3 +9,7 @@ replicaCount: 1
 # Reported by the app so the dashboard clearly shows "dev" when you're
 # looking at this namespace.
 appEnv: "dev"
+
+# No service.port override needed here - the base values.yaml default
+# (5000) already is dev's port. staging and production each override
+# it below since they need their own distinct port on the same server.

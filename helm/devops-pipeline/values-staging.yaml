@@ -6,6 +6,11 @@
 # production closely enough to catch issues before release.
 replicaCount: 2
 
-# Reported by the app so the dashboard clearly shows "production" when
+# Reported by the app so the dashboard clearly shows "staging" when
 # you're looking at this namespace.
 appEnv: "staging"
+
+# staging gets its own port since it now lives on the same server and
+# the same public IP as dev and production.
+service:
+  port: 5001

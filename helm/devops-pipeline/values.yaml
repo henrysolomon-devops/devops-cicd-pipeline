@@ -10,12 +10,16 @@ replicaCount: 2
 
 # Container image settings.
 image:
-  # Same image built and tested with Docker in v1 (no registry needed yet,
-  # since kind loads it directly into the cluster with "kind load docker-image").
-  repository: devops-cicd-pipeline
+  # Since v5.1, all three environments run on the real EC2/k3s server
+  # instead of a local kind cluster, so the image has to come from a
+  # real registry rather than the local Docker daemon. This is the
+  # same ghcr.io image GitHub Actions has been building and pushing
+  # since v4.
+  repository: ghcr.io/henrysolomon-devops/devops-cicd-pipeline
   pullPolicy: IfNotPresent
-  # Explicitly set the tag here instead of relying on Chart.yaml's appVersion,
-  # so the image version used is obvious directly from this file.
+  # This tag is just a fallback for manual testing - in practice,
+  # deploy.yml always overrides it with --set image.tag=<commit sha>
+  # so every deploy uses the exact image that was just built.
   tag: "v1.0.0"
 
 # The environment name shown on the dashboard and reported back by
@@ -24,7 +28,8 @@ image:
 # running Pod actually knows which namespace it's living in.
 appEnv: "unknown"
 
-# No private registry is used yet, so no pull secrets are needed.
+# The ghcr.io package for this project is public, so no pull secret is
+# needed for the cluster to fetch images from it.
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -36,11 +41,16 @@ podLabels: {}
 podSecurityContext: {}
 securityContext: {}
 
-# Service configuration, matching k8s/service.yaml from v2:
-# ClusterIP on port 80, forwarding to the container's port 5000.
+# Since v5.1, this needs to be reachable directly from outside the
+# cluster (the whole point of moving off kind was to test against a
+# real public IP), so the type is LoadBalancer everywhere now - k3s's
+# built-in Klipper load balancer handles this without needing a real
+# AWS load balancer. The port itself differs per environment (see the
+# per-environment override files) so dev/staging/production can all be
+# reached separately on the same server, on different ports.
 service:
-  type: ClusterIP
-  port: 80
+  type: LoadBalancer
+  port: 5000
   targetPort: 5000
 
 resources: {}

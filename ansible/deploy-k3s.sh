@@ -12,6 +12,7 @@ ansible-playbook -i "${SERVER_IP}," install-k3s.yml \
   --extra-vars "ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/devops-pipeline-key tls_san=${SERVER_IP}"
 
 echo "Fetching kubeconfig..."
+mkdir -p ~/.kube
 ssh -i ~/.ssh/devops-pipeline-key -o StrictHostKeyChecking=accept-new \
   ubuntu@"$SERVER_IP" "sudo cat /etc/rancher/k3s/k3s.yaml" > ~/.kube/devops-pipeline-config
 sed -i "s/127.0.0.1/${SERVER_IP}/" ~/.kube/devops-pipeline-config
