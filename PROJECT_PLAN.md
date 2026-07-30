@@ -19,6 +19,7 @@ system. The purpose is twofold:
 | v3.0 | Helm chart | Package management for Kubernetes |
 | v4.0 | GitHub Actions (branch-based deploy) | CI/CD pipeline |
 | v5.0 | Terraform (EC2 + VPC) + Ansible (k3s install) | Infrastructure as Code, Configuration Management |
+| v5.1 | Migrate all environments to the v5 EC2/k3s server, apply/destroy via GitHub Actions + OIDC | Extending CI/CD to a real cloud target |
 | v6.0 | ArgoCD | GitOps-based Continuous Deployment |
 | v7.0 | Jenkins pipeline (alternative to Actions) | Alternative CI tooling |
 | v8.0 | Prometheus + Grafana | Observability & monitoring |
@@ -26,23 +27,33 @@ system. The purpose is twofold:
 
 ## Environment Strategy (from v2 onward)
 
-Three Kubernetes namespaces inside the same cluster, not separate
-servers, to keep cost and complexity down:
+Three Kubernetes namespaces, not separate servers, to keep cost and
+complexity down. Through v5, all three lived on a local `kind` cluster;
+from v5.1 onward, all three live permanently on the same EC2/k3s server,
+each reachable on its own port:
 
 ```
-dev          → early testing, updated on every push to the `dev` branch
-staging      → pre-release testing, updated on push to `staging`
-production   → live version, updated on merge to `main`
+dev          → port 5000, deploys automatically once infrastructure is confirmed ready
+staging      → port 5001, requires manual approval
+production   → port 5002, requires manual approval
 ```
 
 ## Cost & Safety Rules
 
-- The real AWS EC2 instance (from v5 onward) is **never left running**.
-  Standard flow: `terraform apply` → test/record a demo → `terraform destroy`.
-- No real AWS credentials are ever shared or stored in the repo.
-  Terraform/CloudFormation code is written and explained;
-  `apply`/`destroy` are run locally by the repo owner using their own
-  AWS CLI credentials.
+- The real AWS EC2 instance is **never left running** by accident.
+  Standard flow: run `infra.yml` with `apply` → test → run `infra.yml`
+  with `destroy` once no longer needed.
+- **From v5.1 onward**, `apply`/`destroy` run through a dedicated GitHub
+  Actions workflow (`infra.yml`), authenticating to AWS via **OIDC**
+  rather than a stored access key - GitHub issues a short-lived token
+  proving the run genuinely comes from this repo, and AWS grants
+  temporary credentials based on that. No AWS access key is ever stored
+  in the repo or anywhere else. The workflow only ever runs by manual
+  trigger, gated behind a required-reviewer environment, never
+  automatically on a push - so building or destroying real
+  infrastructure always requires a deliberate, approved action.
+  (Before v5.1, this was done locally using the repo owner's own AWS
+  CLI credentials.)
 
 ## Repository Conventions
 
@@ -59,8 +70,6 @@ production   → live version, updated on merge to `main`
 - **Branching:**
   ```
   main     → always stable, fully working
-  dev      → active development (namespace: dev, from v2 on)
-  staging  → pre-release testing (namespace: staging, from v2 on)
   ```
   Per version: branch off as `feature/vX-short-name`, merge to `main`,
   then tag:
