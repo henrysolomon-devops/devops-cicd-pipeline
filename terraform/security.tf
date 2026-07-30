@@ -1,6 +1,6 @@
 resource "aws_security_group" "server" {
   name        = "devops-pipeline-sg"
-  description = "Security group for the EC2/k3s server - SSH is locked to me, everything else starts closed and opens only for the length of a workflow run"
+  description = "Security group for the EC2/k3s server - SSH and app ports are always open for me, GitHub's runners get temporary access per workflow run"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -11,9 +11,28 @@ resource "aws_security_group" "server" {
     cidr_blocks = [var.my_ip]
   }
 
-  # No ingress rules here for the k3s API (6443) or the app ports
-  # (5000/5001/5002) on purpose - those get added and removed
-  # dynamically by the workflows that actually need them, see
+  # Always open for my own machine so I can check the app in a browser or run
+  # kubectl manually anytime, without waiting for a workflow run to
+  # temporarily open a port first. This survives every destroy/apply
+  # cycle, unlike the manual console rule I kept losing.
+  ingress {
+    description = "App ports (dev/staging/production), always reachable from my own machine"
+    from_port   = 5000
+    to_port     = 5002
+    protocol    = "tcp"
+    cidr_blocks = [var.my_ip]
+  }
+
+  ingress {
+    description = "k3s API, always reachable from my own machine"
+    from_port   = 6443
+    to_port     = 6443
+    protocol    = "tcp"
+    cidr_blocks = [var.my_ip]
+  }
+
+  # No permanent ingress rules here for GitHub's runners - those open
+  # and close dynamically per workflow run via the AWS CLI, see
   # infra.yml and deploy.yml.
 
   egress {
