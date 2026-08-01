@@ -158,6 +158,10 @@ jobs:
       # every time, not just once by hand.
       - name: Register the three environment Applications with ArgoCD
         if: inputs.action == 'apply'
+        # This job defaults to running inside terraform/, but the argocd/
+        # folder lives at the repo root - without this override, kubectl
+        # would look for terraform/argocd/dev-application.yaml instead.
+        working-directory: ${{ github.workspace }}
         run: |
           export KUBECONFIG=~/.kube/devops-pipeline-config
           kubectl apply -f argocd/dev-application.yaml
