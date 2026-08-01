@@ -119,6 +119,10 @@ jobs:
       - name: Create a branch and update the dev image tag
         run: |
           BRANCH="bump-dev-${{ needs.build.outputs.image_tag }}"
+          # If a previous, failed run already pushed this same branch
+          # (same commit SHA means same branch name), clear it out first
+          # so this run isn't rejected for diverging from leftover history.
+          git push origin --delete "$BRANCH" || true
           git checkout -b "$BRANCH"
           sed -i "s/tag:.*/tag: \"${{ needs.build.outputs.image_tag }}\"/" \
             helm/devops-pipeline/values-dev.yaml

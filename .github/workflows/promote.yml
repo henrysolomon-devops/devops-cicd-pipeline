@@ -1,99 +1,155 @@
-# This is how a tested image tag actually moves forward from dev to
-# staging, and from staging to production. It's never triggered by a
-# push - only by hand, whenever I've tested the current environment and
-# decided the same image is ready to move to the next one.
+# This workflow now only handles the CI half of CI/CD - it builds the
+# image and pushes it to GitHub Container Registry, then hands off to
+# ArgoCD for the actual deployment. It never talks to the Kubernetes
+# cluster directly anymore, and it never needs a kubeconfig, a security
+# group, or any AWS credentials to get an image running - ArgoCD, which
+# lives inside the cluster itself, takes care of that part on its own by
+# watching this repo.
 #
-# Unlike deploy.yml's dev job, this workflow does NOT merge its own pull
-# request. It opens the PR and stops there - reviewing and merging it is
-# the actual approval step for staging and production, replacing the
-# old GitHub Environment "click to approve" gate entirely.
-#
-# Before opening that PR, it also checks that the tag being promoted is
-# really the one currently running one stage back (dev, for a staging
-# promotion; staging, for a production promotion). This exists purely
-# to catch a simple mistake - picking "production" when "staging" was
-# meant - before anything gets proposed for the wrong environment.
+# dev gets updated automatically the moment a build finishes - through a
+# pull request that this workflow opens and immediately merges itself,
+# since main's branch protection means even an automated change has to
+# go through a PR, not a direct push. staging and production are handled
+# by a separate workflow (promote.yml), triggered by hand once dev has
+# been tested, and their PRs are left open for a real review and merge.
 
-name: Promote
+name: Build and Deploy
 
 on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: "Which environment is this tag being promoted to?"
-        required: true
-        type: choice
-        options:
-          - staging
-          - production
-      image_tag:
-        description: "The image tag (commit SHA) to promote - the same one already tested in the previous environment"
-        required: true
-        type: string
+  push:
+    branches:
+      - main
+    # These three files are only ever changed by automation (this
+    # workflow, or promote.yml) - never by hand as part of an app code
+    # change. Without ignoring them here, merging one of those automated
+    # PRs would trigger this whole workflow again, which would build a
+    # pointless duplicate image and try to update the same file again,
+    # forever.
+    paths-ignore:
+      - "helm/devops-pipeline/values-dev.yaml"
+      - "helm/devops-pipeline/values-staging.yaml"
+      - "helm/devops-pipeline/values-production.yaml"
+  workflow_dispatch: {}
 
-permissions:
-  contents: write
-  pull-requests: write
+env:
+  IMAGE_NAME: ghcr.io/henrysolomon-devops/devops-cicd-pipeline
 
 jobs:
-  promote:
+  build:
+    # Still just builds and pushes the image - doesn't touch Git or
+    # Kubernetes at all, so a build problem stays easy to tell apart
+    # from anything happening further down the pipeline.
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ github.sha }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # staging can only receive a tag that's already running in dev;
-      # production can only receive a tag that's already running in
-      # staging. This is what actually enforces the promotion order -
-      # picking the wrong environment by mistake fails here instead of
-      # silently proposing a change nobody tested yet.
-      - name: Work out which environment comes before this one
-        id: previous
-        run: |
-          if [ "${{ inputs.environment }}" = "staging" ]; then
-            echo "file=helm/devops-pipeline/values-dev.yaml" >> "$GITHUB_OUTPUT"
-            echo "name=dev" >> "$GITHUB_OUTPUT"
-          else
-            echo "file=helm/devops-pipeline/values-staging.yaml" >> "$GITHUB_OUTPUT"
-            echo "name=staging" >> "$GITHUB_OUTPUT"
-          fi
+      # This keeps the human-readable version shown on the dashboard
+      # (e.g. "6.0.0") separate from the image tag used in ghcr.io
+      # (the commit SHA). The SHA is what guarantees every build is
+      # unique and traceable; the VERSION file is just for people
+      # reading the dashboard, and only changes when I bump it by hand
+      # before tagging a new release.
+      - name: Read the current app version
+        id: version
+        run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
-      - name: Confirm this tag is actually running in the previous environment
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
         run: |
-          CURRENT_TAG=$(grep 'tag:' "${{ steps.previous.outputs.file }}" | sed -E 's/.*tag: *"?([^"]*)"?.*/\1/')
-          if [ "$CURRENT_TAG" != "${{ inputs.image_tag }}" ]; then
-            echo "::error::Tag ${{ inputs.image_tag }} isn't the one currently running in ${{ steps.previous.outputs.name }} (found $CURRENT_TAG instead). Promote it to ${{ steps.previous.outputs.name }} first."
-            exit 1
-          fi
-          echo "Confirmed - ${{ inputs.image_tag }} is currently running in ${{ steps.previous.outputs.name }}."
+          docker build \
+            --build-arg APP_VERSION=${{ steps.version.outputs.value }} \
+            -t $IMAGE_NAME:${{ github.sha }} \
+            -f docker/Dockerfile .
+
+      - name: Push Docker image
+        run: |
+          docker push $IMAGE_NAME:${{ github.sha }}
+
+  # Doesn't do anything by itself - just sits here and waits for me to
+  # confirm, through the infra-check environment, that I've actually
+  # run infra.yml and the AWS server (and ArgoCD on top of it) is up
+  # before anything tries to point a change at it.
+  infra-check:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: infra-check
+
+    steps:
+      - name: Confirmed - infrastructure is up
+        run: echo "Proceeding, infrastructure has been confirmed ready."
+
+  deploy-dev:
+    # No protection rules on dev, so this opens its own PR and merges
+    # it right away, without waiting for anyone. "build" is listed
+    # directly here too (not just via infra-check), since a job can
+    # only read another job's outputs if that job is a direct entry in
+    # its own needs list - a job two steps upstream doesn't count, even
+    # if the ordering still works out.
+    needs: [build, infra-check]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set git identity for the automated commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create a branch and update the target environment's image tag
-        id: branch
+      - name: Create a branch and update the dev image tag
         run: |
-          BRANCH="promote-${{ inputs.environment }}-${{ inputs.image_tag }}"
-          TARGET_FILE="helm/devops-pipeline/values-${{ inputs.environment }}.yaml"
+          BRANCH="bump-dev-${{ needs.build.outputs.image_tag }}"
+          # If a previous, failed run already pushed this same branch
+          # (same commit SHA means same branch name), clear it out first
+          # so this run isn't rejected for diverging from leftover history.
+          git push origin --delete "$BRANCH" || true
           git checkout -b "$BRANCH"
-          sed -i "s/tag:.*/tag: \"${{ inputs.image_tag }}\"/" "$TARGET_FILE"
-          git add "$TARGET_FILE"
-          git commit -m "Promote ${{ inputs.image_tag }} to ${{ inputs.environment }}"
+          sed -i "s/tag:.*/tag: \"${{ needs.build.outputs.image_tag }}\"/" \
+            helm/devops-pipeline/values-dev.yaml
+          git add helm/devops-pipeline/values-dev.yaml
+          git commit -m "Bump dev image tag to ${{ needs.build.outputs.image_tag }}"
           git push origin "$BRANCH"
-          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      # This PR is deliberately left open - reviewing the diff and
-      # merging it, by hand, is what actually approves this promotion.
-      # No auto-merge here, unlike deploy.yml's dev job.
       - name: Open the pull request
+        id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          BRANCH="bump-dev-${{ needs.build.outputs.image_tag }}"
           gh pr create \
             --base main \
-            --head "${{ steps.branch.outputs.name }}" \
-            --title "Promote ${{ inputs.image_tag }} to ${{ inputs.environment }}" \
-            --body "Tag \`${{ inputs.image_tag }}\` was confirmed running in ${{ steps.previous.outputs.name }}. Merging this PR is what approves the promotion to ${{ inputs.environment }} - ArgoCD picks it up automatically once merged."
+            --head "$BRANCH" \
+            --title "Bump dev image tag to ${{ needs.build.outputs.image_tag }}" \
+            --body "Automated tag bump for dev, no review needed since dev has no approval gate."
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      # Dev has no approval gate by design, so this merges its own PR
+      # immediately rather than leaving it open for someone to click.
+      # It still goes through a real PR first, though, since main's
+      # branch protection doesn't allow a direct push even from
+      # automation.
+      - name: Merge the pull request immediately
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "${{ steps.pr.outputs.branch }}" --squash --delete-branch
