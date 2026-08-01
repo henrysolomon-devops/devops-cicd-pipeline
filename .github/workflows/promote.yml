@@ -95,3 +95,4 @@ jobs:
             --head "${{ steps.branch.outputs.name }}" \
             --title "Promote ${{ steps.tag.outputs.value }} to ${{ inputs.environment }}" \
             --body "Tag \`${{ steps.tag.outputs.value }}\` is what's currently running in ${{ steps.previous.outputs.name }}. Merging this PR is what approves the promotion to ${{ inputs.environment }} - ArgoCD picks it up automatically once merged."
+
