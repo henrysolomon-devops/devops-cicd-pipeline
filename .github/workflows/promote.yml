@@ -1,18 +1,19 @@
 # This is how a tested image tag actually moves forward from dev to
 # staging, and from staging to production. It's never triggered by a
 # push - only by hand, whenever I've tested the current environment and
-# decided the same image is ready to move to the next one.
+# decided it's ready to move to the next one.
 #
 # Unlike deploy.yml's dev job, this workflow does NOT merge its own pull
 # request. It opens the PR and stops there - reviewing and merging it is
 # the actual approval step for staging and production, replacing the
 # old GitHub Environment "click to approve" gate entirely.
 #
-# Before opening that PR, it also checks that the tag being promoted is
-# really the one currently running one stage back (dev, for a staging
-# promotion; staging, for a production promotion). This exists purely
-# to catch a simple mistake - picking "production" when "staging" was
-# meant - before anything gets proposed for the wrong environment.
+# There's no manual "which tag" input here on purpose. The tag to
+# promote is read directly from the previous environment's values file
+# at the moment this runs - dev's file for a staging promotion,
+# staging's file for a production promotion - so it's always whatever
+# is actually running right now, never something typed in by hand that
+# could already be stale by the time the workflow starts.
 
 name: Promote
 
@@ -20,16 +21,12 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Which environment is this tag being promoted to?"
+        description: "Which environment is this being promoted to?"
         required: true
         type: choice
         options:
           - staging
           - production
-      image_tag:
-        description: "The image tag (commit SHA) to promote - the same one already tested in the previous environment"
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -43,11 +40,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # staging can only receive a tag that's already running in dev;
-      # production can only receive a tag that's already running in
-      # staging. This is what actually enforces the promotion order -
-      # picking the wrong environment by mistake fails here instead of
-      # silently proposing a change nobody tested yet.
+      # staging always gets whatever tag is currently running in dev;
+      # production always gets whatever tag is currently running in
+      # staging. Reading it live like this, instead of taking it as an
+      # input, is what guarantees it's never a stale value.
       - name: Work out which environment comes before this one
         id: previous
         run: |
@@ -59,14 +55,12 @@ jobs:
             echo "name=staging" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Confirm this tag is actually running in the previous environment
+      - name: Read the tag currently running in the previous environment
+        id: tag
         run: |
           CURRENT_TAG=$(grep 'tag:' "${{ steps.previous.outputs.file }}" | sed -E 's/.*tag: *"?([^"]*)"?.*/\1/')
-          if [ "$CURRENT_TAG" != "${{ inputs.image_tag }}" ]; then
-            echo "::error::Tag ${{ inputs.image_tag }} isn't the one currently running in ${{ steps.previous.outputs.name }} (found $CURRENT_TAG instead). Promote it to ${{ steps.previous.outputs.name }} first."
-            exit 1
-          fi
-          echo "Confirmed - ${{ inputs.image_tag }} is currently running in ${{ steps.previous.outputs.name }}."
+          echo "value=$CURRENT_TAG" >> "$GITHUB_OUTPUT"
+          echo "Promoting $CURRENT_TAG from ${{ steps.previous.outputs.name }} to ${{ inputs.environment }}."
 
       - name: Set git identity for the automated commit
         run: |
@@ -76,16 +70,16 @@ jobs:
       - name: Create a branch and update the target environment's image tag
         id: branch
         run: |
-          BRANCH="promote-${{ inputs.environment }}-${{ inputs.image_tag }}"
+          BRANCH="promote-${{ inputs.environment }}-${{ steps.tag.outputs.value }}"
           TARGET_FILE="helm/devops-pipeline/values-${{ inputs.environment }}.yaml"
           # Same reasoning as deploy.yml - if a previous attempt already
           # pushed this branch and failed at a later step, clear it out
           # first so this run doesn't get rejected over diverged history.
           git push origin --delete "$BRANCH" || true
           git checkout -b "$BRANCH"
-          sed -i "s/tag:.*/tag: \"${{ inputs.image_tag }}\"/" "$TARGET_FILE"
+          sed -i "s/tag:.*/tag: \"${{ steps.tag.outputs.value }}\"/" "$TARGET_FILE"
           git add "$TARGET_FILE"
-          git commit -m "Promote ${{ inputs.image_tag }} to ${{ inputs.environment }}"
+          git commit -m "Promote ${{ steps.tag.outputs.value }} to ${{ inputs.environment }}"
           git push origin "$BRANCH"
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
@@ -99,5 +93,5 @@ jobs:
           gh pr create \
             --base main \
             --head "${{ steps.branch.outputs.name }}" \
-            --title "Promote ${{ inputs.image_tag }} to ${{ inputs.environment }}" \
-            --body "Tag \`${{ inputs.image_tag }}\` was confirmed running in ${{ steps.previous.outputs.name }}. Merging this PR is what approves the promotion to ${{ inputs.environment }} - ArgoCD picks it up automatically once merged."
+            --title "Promote ${{ steps.tag.outputs.value }} to ${{ inputs.environment }}" \
+            --body "Tag \`${{ steps.tag.outputs.value }}\` is what's currently running in ${{ steps.previous.outputs.name }}. Merging this PR is what approves the promotion to ${{ inputs.environment }} - ArgoCD picks it up automatically once merged."
