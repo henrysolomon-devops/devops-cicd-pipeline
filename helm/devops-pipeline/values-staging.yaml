@@ -14,3 +14,10 @@ appEnv: "staging"
 # the same public IP as dev and production.
 service:
   port: 5001
+
+# This only ever gets updated by promote.yml, when a tag already
+# confirmed working in dev is promoted here through a reviewed pull
+# request - never edited by hand, and never touched directly by
+# deploy.yml the way values-dev.yaml is.
+image:
+  tag: "v1.0.0"
