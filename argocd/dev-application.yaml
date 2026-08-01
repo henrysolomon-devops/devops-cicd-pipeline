@@ -1,0 +1,33 @@
+# This tells ArgoCD everything it needs to manage the dev environment on
+# its own: where the chart lives, which values file to use for dev, and
+# which namespace it belongs in. Once this is applied once, ArgoCD keeps
+# watching the repo forever - there's nothing else to run by hand after
+# this point, dev updates itself the moment values-dev.yaml changes.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: devops-pipeline-dev
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/henrysolomon-devops/devops-cicd-pipeline.git
+    targetRevision: main
+    path: helm/devops-pipeline
+    helm:
+      valueFiles:
+        - values-dev.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev
+
+  syncPolicy:
+    # Dev has no approval gate by design - the moment a commit lands on
+    # main with a new image tag for dev, this rolls it out right away.
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

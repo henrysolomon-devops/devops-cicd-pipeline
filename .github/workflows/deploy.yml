@@ -1,16 +1,17 @@
-# This workflow handles the full CI/CD flow for the project.
-# Every push to main builds a fresh image, pushes it to GitHub Container
-# Registry, and then rolls it out to dev, staging, and production - one
-# after another, never all at once, all on the same EC2/k3s server set
-# up by infra.yml. There's a manual gate right after the build (to
-# confirm the AWS server is actually up before anything tries to reach
-# it), and staging and production each get their own separate approval
-# on top of that.
+# This workflow now only handles the CI half of CI/CD - it builds the
+# image and pushes it to GitHub Container Registry, then hands off to
+# ArgoCD for the actual deployment. It never talks to the Kubernetes
+# cluster directly anymore, and it never needs a kubeconfig, a security
+# group, or any AWS credentials to get an image running - ArgoCD, which
+# lives inside the cluster itself, takes care of that part on its own by
+# watching this repo.
 #
-# Since v5.1, everything here runs on GitHub-hosted runners rather than
-# the self-hosted one - there's no local kind cluster left to reach, so
-# there's no reason for any of this to depend on my own machine being
-# on.
+# dev gets updated automatically the moment a build finishes - through a
+# pull request that this workflow opens and immediately merges itself,
+# since main's branch protection means even an automated change has to
+# go through a PR, not a direct push. staging and production are handled
+# by a separate workflow (promote.yml), triggered by hand once dev has
+# been tested, and their PRs are left open for a real review and merge.
 
 name: Build and Deploy
 
@@ -18,6 +19,16 @@ on:
   push:
     branches:
       - main
+    # These three files are only ever changed by automation (this
+    # workflow, or promote.yml) - never by hand as part of an app code
+    # change. Without ignoring them here, merging one of those automated
+    # PRs would trigger this whole workflow again, which would build a
+    # pointless duplicate image and try to update the same file again,
+    # forever.
+    paths-ignore:
+      - "helm/devops-pipeline/values-dev.yaml"
+      - "helm/devops-pipeline/values-staging.yaml"
+      - "helm/devops-pipeline/values-production.yaml"
   workflow_dispatch: {}
 
 env:
@@ -25,9 +36,9 @@ env:
 
 jobs:
   build:
-    # Just builds and pushes the image - doesn't touch Kubernetes at
-    # all, so a build problem and a deployment problem are always easy
-    # to tell apart at a glance.
+    # Still just builds and pushes the image - doesn't touch Git or
+    # Kubernetes at all, so a build problem stays easy to tell apart
+    # from anything happening further down the pipeline.
     runs-on: ubuntu-latest
 
     permissions:
@@ -41,6 +52,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # This keeps the human-readable version shown on the dashboard
+      # (e.g. "6.0.0") separate from the image tag used in ghcr.io
+      # (the commit SHA). The SHA is what guarantees every build is
+      # unique and traceable; the VERSION file is just for people
+      # reading the dashboard, and only changes when I bump it by hand
+      # before tagging a new release.
+      - name: Read the current app version
+        id: version
+        run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -50,7 +71,10 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t $IMAGE_NAME:${{ github.sha }} -f docker/Dockerfile .
+          docker build \
+            --build-arg APP_VERSION=${{ steps.version.outputs.value }} \
+            -t $IMAGE_NAME:${{ github.sha }} \
+            -f docker/Dockerfile .
 
       - name: Push Docker image
         run: |
@@ -58,8 +82,8 @@ jobs:
 
   # Doesn't do anything by itself - just sits here and waits for me to
   # confirm, through the infra-check environment, that I've actually
-  # run infra.yml and the AWS server is up before anything tries to
-  # deploy onto it.
+  # run infra.yml and the AWS server (and ArgoCD on top of it) is up
+  # before anything tries to point a change at it.
   infra-check:
     needs: build
     runs-on: ubuntu-latest
@@ -70,217 +94,58 @@ jobs:
         run: echo "Proceeding, infrastructure has been confirmed ready."
 
   deploy-dev:
-    # No protection rules on dev, so this runs immediately once
-    # infra-check clears - no separate approval needed here.
-    # "build" is listed directly here too (not just via infra-check),
-    # since a job can only read another job's outputs if that job is a
-    # direct entry in its own needs list - a job two steps upstream
-    # doesn't count, even if the ordering still works out.
+    # No protection rules on dev, so this opens its own PR and merges
+    # it right away, without waiting for anyone. "build" is listed
+    # directly here too (not just via infra-check), since a job can
+    # only read another job's outputs if that job is a direct entry in
+    # its own needs list - a job two steps upstream doesn't count, even
+    # if the ordering still works out.
     needs: [build, infra-check]
     runs-on: ubuntu-latest
-    environment: dev
-    env:
-      NAMESPACE: dev
-      APP_PORT: 5000
 
     permissions:
-      id-token: write
-      contents: read
+      contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure kubectl for the remote k3s server
+      - name: Set git identity for the automated commit
         run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-
-      - name: Figure out this runner's own public IP
-        id: runner_ip
-        run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
-
-      - name: Get temporary AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::578254188866:role/github-actions-terraform-role
-          aws-region: us-east-1
-
-      - name: Temporarily open this environment's app port for this runner
+      - name: Create a branch and update the dev image tag
         run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port ${{ env.APP_PORT }} \
-            --cidr ${{ steps.runner_ip.outputs.cidr }}
+          BRANCH="bump-dev-${{ needs.build.outputs.image_tag }}"
+          git checkout -b "$BRANCH"
+          sed -i "s/tag:.*/tag: \"${{ needs.build.outputs.image_tag }}\"/" \
+            helm/devops-pipeline/values-dev.yaml
+          git add helm/devops-pipeline/values-dev.yaml
+          git commit -m "Bump dev image tag to ${{ needs.build.outputs.image_tag }}"
+          git push origin "$BRANCH"
 
-      - name: Temporarily open the k3s API for this runner
+      - name: Open the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port 6443 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }}
+          BRANCH="bump-dev-${{ needs.build.outputs.image_tag }}"
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "Bump dev image tag to ${{ needs.build.outputs.image_tag }}" \
+            --body "Automated tag bump for dev, no review needed since dev has no approval gate."
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy to dev namespace
+      # Dev has no approval gate by design, so this merges its own PR
+      # immediately rather than leaving it open for someone to click.
+      # It still goes through a real PR first, though, since main's
+      # branch protection doesn't allow a direct push even from
+      # automation.
+      - name: Merge the pull request immediately
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          helm upgrade --install devops-pipeline helm/devops-pipeline \
-            -f helm/devops-pipeline/values-dev.yaml \
-            --set image.repository=$IMAGE_NAME \
-            --set image.tag=${{ needs.build.outputs.image_tag }} \
-            -n ${{ env.NAMESPACE }}
-
-      - name: Close the temporary access back up
-        if: always()
-        run: |
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port ${{ env.APP_PORT }} \
-            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port 6443 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
-
-  deploy-staging:
-    # This is where the workflow pauses for a manual approval, since
-    # staging has a required reviewer set up in its environment.
-    needs: [build, deploy-dev]
-    runs-on: ubuntu-latest
-    environment: staging
-    env:
-      NAMESPACE: staging
-      APP_PORT: 5001
-
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure kubectl for the remote k3s server
-        run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-
-      - name: Figure out this runner's own public IP
-        id: runner_ip
-        run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
-
-      - name: Get temporary AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::578254188866:role/github-actions-terraform-role
-          aws-region: us-east-1
-
-      - name: Temporarily open this environment's app port for this runner
-        run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port ${{ env.APP_PORT }} \
-            --cidr ${{ steps.runner_ip.outputs.cidr }}
-
-      - name: Temporarily open the k3s API for this runner
-        run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port 6443 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }}
-
-      - name: Deploy to staging namespace
-        run: |
-          helm upgrade --install devops-pipeline helm/devops-pipeline \
-            -f helm/devops-pipeline/values-staging.yaml \
-            --set image.repository=$IMAGE_NAME \
-            --set image.tag=${{ needs.build.outputs.image_tag }} \
-            -n ${{ env.NAMESPACE }}
-
-      - name: Close the temporary access back up
-        if: always()
-        run: |
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port ${{ env.APP_PORT }} \
-            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port 6443 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
-
-  deploy-production:
-    # Same idea as staging - its own separate approval before touching
-    # the production namespace. Two approvals in a row (staging, then
-    # production) means two real chances to catch a problem before it
-    # reaches the live version.
-    needs: [build, deploy-staging]
-    runs-on: ubuntu-latest
-    environment: production
-    env:
-      NAMESPACE: production
-      APP_PORT: 5002
-
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure kubectl for the remote k3s server
-        run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-
-      - name: Figure out this runner's own public IP
-        id: runner_ip
-        run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
-
-      - name: Get temporary AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::578254188866:role/github-actions-terraform-role
-          aws-region: us-east-1
-
-      - name: Temporarily open this environment's app port for this runner
-        run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port ${{ env.APP_PORT }} \
-            --cidr ${{ steps.runner_ip.outputs.cidr }}
-
-      - name: Temporarily open the k3s API for this runner
-        run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port 6443 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }}
-
-      - name: Deploy to production namespace
-        run: |
-          helm upgrade --install devops-pipeline helm/devops-pipeline \
-            -f helm/devops-pipeline/values-production.yaml \
-            --set image.repository=$IMAGE_NAME \
-            --set image.tag=${{ needs.build.outputs.image_tag }} \
-            -n ${{ env.NAMESPACE }}
-
-      - name: Close the temporary access back up
-        if: always()
-        run: |
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port ${{ env.APP_PORT }} \
-            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ vars.SECURITY_GROUP_ID }} \
-            --protocol tcp --port 6443 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
+          gh pr merge "${{ steps.pr.outputs.branch }}" --squash --delete-branch

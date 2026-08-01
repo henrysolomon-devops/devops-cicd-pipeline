@@ -13,3 +13,9 @@ appEnv: "production"
 # production gets its own port too, same reasoning as staging.
 service:
   port: 5002
+
+# Same story as staging - this only changes through promote.yml, once
+# a tag has already been confirmed working in staging and the
+# resulting pull request has been reviewed and merged by hand.
+image:
+  tag: "v1.0.0"

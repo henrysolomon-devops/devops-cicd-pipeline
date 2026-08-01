@@ -36,10 +36,8 @@ COPY app/templates/ templates/
 
 EXPOSE 5000
 
-# Set a default value for the app version. This can be overridden
-# at container run time, e.g.: docker run -e APP_VERSION=v1.2.0 ...
-
-ENV APP_VERSION=v1.0.0
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
 
 # The command that runs when the container starts.
 

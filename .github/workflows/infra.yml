@@ -122,6 +122,52 @@ jobs:
           kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
 
+      # Every time this workflow rebuilds the server from scratch, the new
+      # box has no idea ArgoCD ever existed - so installing it can't be a
+      # one-off manual step, it has to live right here alongside the
+      # namespaces, or it'll quietly vanish on the next destroy/apply cycle.
+      - name: Create the argocd namespace
+        if: inputs.action == 'apply'
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+      # Pinning an exact version here instead of pointing at "stable" means
+      # this install behaves the same way every single time it runs, rather
+      # than quietly picking up whatever ArgoCD happens to release next.
+      - name: Install ArgoCD
+        if: inputs.action == 'apply'
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.2/manifests/install.yaml
+
+      # ArgoCD's own components take a little while to come up after being
+      # applied, so this waits until they're actually ready instead of just
+      # assuming they are and moving on to whatever step comes next.
+      - name: Wait for ArgoCD to come up
+        if: inputs.action == 'apply'
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          kubectl wait --for=condition=available --timeout=180s deployment/argocd-server -n argocd
+          kubectl wait --for=condition=available --timeout=180s deployment/argocd-repo-server -n argocd
+
+      # These three manifests are what actually tell ArgoCD about our app -
+      # without this step, ArgoCD would be up and running but managing
+      # nothing at all. Same reasoning as the namespaces above: a fresh
+      # server has none of this registered yet, so it has to happen here
+      # every time, not just once by hand.
+      - name: Register the three environment Applications with ArgoCD
+        if: inputs.action == 'apply'
+        # This job defaults to running inside terraform/, but the argocd/
+        # folder lives at the repo root - without this override, kubectl
+        # would look for terraform/argocd/dev-application.yaml instead.
+        working-directory: ${{ github.workspace }}
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          kubectl apply -f argocd/dev-application.yaml
+          kubectl apply -f argocd/staging-application.yaml
+          kubectl apply -f argocd/production-application.yaml
+
       - name: Save the freshly generated kubeconfig as a repo secret
         if: inputs.action == 'apply'
         env:

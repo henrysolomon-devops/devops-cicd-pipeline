@@ -10,6 +10,16 @@ replicaCount: 1
 # looking at this namespace.
 appEnv: "dev"
 
+# Before v6, this tag was never stored in a file at all - deploy.yml
+# passed it straight to Helm with --set image.tag=<sha> at deploy time.
+# Now that ArgoCD is the one applying changes (by reading this file,
+# not by running a command), the tag has to actually live here so
+# there's something for deploy.yml to update and something for ArgoCD
+# to read. deploy.yml's dev job overwrites this value automatically on
+# every build - there's no need to ever edit it by hand.
+image:
+  tag: "v1.0.0"
+
 # No service.port override needed here - the base values.yaml default
 # (5000) already is dev's port. staging and production each override
 # it below since they need their own distinct port on the same server.
