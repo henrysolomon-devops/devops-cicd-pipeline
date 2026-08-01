@@ -18,7 +18,7 @@ appEnv: "dev"
 # to read. deploy.yml's dev job overwrites this value automatically on
 # every build - there's no need to ever edit it by hand.
 image:
-  tag: "e8a8fd7bf579151dd3fe243e577571e404d87151"
+  tag: "9818f5906d8aab691680af36ccfce11e49945ba7"
 
 # No service.port override needed here - the base values.yaml default
 # (5000) already is dev's port. staging and production each override
