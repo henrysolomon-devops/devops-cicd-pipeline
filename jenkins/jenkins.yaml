@@ -1,0 +1,57 @@
+# This file is the entire Jenkins setup, in code. Every destroy/apply
+# cycle rebuilds jenkins-server from scratch, and this is what Jenkins
+# reads on startup (via the CASC_JENKINS_CONFIG environment variable set
+# in install-jenkins.yml) to configure itself automatically - no manual
+# setup wizard, no clicking through "Manage Jenkins" by hand.
+#
+# Security note: this server sits behind a security group that only
+# lets my own IP reach port 8080 (see terraform/security.tf), so this
+# config deliberately doesn't set up a security realm or authorization
+# strategy - anyone who can reach this box at all is already me. That's
+# a reasonable simplification for a throwaway learning server, not
+# something I'd do for a real shared Jenkins instance.
+jenkins:
+  systemMessage: "devops-cicd-pipeline - Jenkins (v7), rebuilt automatically from jenkins/jenkins.yaml on every destroy/apply cycle."
+  numExecutors: 2
+
+# The one real secret this whole file needs: a GitHub PAT with
+# packages:write, used later in the Jenkinsfile to push images to
+# ghcr.io. The actual token value never appears here - ${GHCR_PAT}
+# is resolved at startup from a file of the same name in the JCasC
+# secrets directory (see install-jenkins.yml), which install-jenkins.yml
+# writes from a GitHub Actions secret, never from anything committed
+# to this repo.
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: "ghcr-credentials"
+              username: "henrysolomon-devops"
+              password: "${GHCR_PAT}"
+              description: "GitHub Container Registry push token, used by the pipeline's build stage"
+
+# Registers the pipeline job itself as code, via the Job DSL plugin,
+# instead of clicking "New Item" by hand every time this server gets
+# rebuilt. The job just points at this repo's main branch and reads
+# its instructions from the Jenkinsfile at the repo root - the actual
+# pipeline stages (build, deploy to dev, approval gates for staging
+# and production) live there, not here.
+jobs:
+  - script: >
+      pipelineJob('devops-cicd-pipeline') {
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('https://github.com/henrysolomon-devops/devops-cicd-pipeline.git')
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('Jenkinsfile')
+          }
+        }
+      }

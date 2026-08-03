@@ -70,27 +70,29 @@ jobs:
         if: inputs.action == 'apply'
         run: terraform apply -auto-approve -var="my_ip=${{ vars.MY_IP }}"
 
-      - name: Look up the security group this run needs to touch
+      # Two separate security groups now that jenkins-server exists
+      # alongside app_server - each one gets its own temporary hole
+      # opened for this runner, further down.
+      - name: Look up the app server's security group
         if: inputs.action == 'apply'
-        id: sg
-        run: echo "id=$(terraform output -raw security_group_id)" >> "$GITHUB_OUTPUT"
+        id: app_sg
+        run: echo "id=$(terraform output -raw app_server_security_group_id)" >> "$GITHUB_OUTPUT"
 
-      - name: Save the security group ID for deploy.yml to use later
+      - name: Look up the Jenkins server's security group
         if: inputs.action == 'apply'
-        env:
-          GH_TOKEN: ${{ secrets.ADMIN_PAT }}
-        run: gh variable set SECURITY_GROUP_ID --body "${{ steps.sg.outputs.id }}"
+        id: jenkins_sg
+        run: echo "id=$(terraform output -raw jenkins_server_security_group_id)" >> "$GITHUB_OUTPUT"
 
       - name: Figure out this runner's own public IP
         if: inputs.action == 'apply'
         id: runner_ip
         run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
 
-      - name: Temporarily let this runner SSH in, just long enough for Ansible
+      - name: Temporarily let this runner SSH into the app server, just long enough for Ansible
         if: inputs.action == 'apply'
         run: |
           aws ec2 authorize-security-group-ingress \
-            --group-id ${{ steps.sg.outputs.id }} \
+            --group-id ${{ steps.app_sg.outputs.id }} \
             --protocol tcp --port 22 \
             --cidr ${{ steps.runner_ip.outputs.cidr }}
 
@@ -98,8 +100,18 @@ jobs:
         if: inputs.action == 'apply'
         run: |
           aws ec2 authorize-security-group-ingress \
-            --group-id ${{ steps.sg.outputs.id }} \
+            --group-id ${{ steps.app_sg.outputs.id }} \
             --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }}
+
+      # New in v7 - the Jenkins server needs the same brief SSH window
+      # so Ansible can install and configure it, same as the app server.
+      - name: Temporarily let this runner SSH into the Jenkins server too
+        if: inputs.action == 'apply'
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ steps.jenkins_sg.outputs.id }} \
+            --protocol tcp --port 22 \
             --cidr ${{ steps.runner_ip.outputs.cidr }}
 
       - name: Write out the SSH private key so Ansible can use it
@@ -122,70 +134,34 @@ jobs:
           kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
 
-      # Every time this workflow rebuilds the server from scratch, the new
-      # box has no idea ArgoCD ever existed - so installing it can't be a
-      # one-off manual step, it has to live right here alongside the
-      # namespaces, or it'll quietly vanish on the next destroy/apply cycle.
-      - name: Create the argocd namespace
+      # New in v7, replacing everything ArgoCD used to need here (its
+      # own namespace, the install itself, and registering the three
+      # Applications). None of that exists on this cluster anymore -
+      # Jenkins deploys directly instead of a GitOps agent watching Git.
+      # deploy-jenkins.sh needs the app server's kubeconfig (just
+      # fetched above by deploy-k3s.sh) to copy onto the Jenkins server,
+      # and the GHCR push token so JCasC can hand it to the pipeline.
+      - name: Run the Ansible playbook to install Jenkins
         if: inputs.action == 'apply'
-        run: |
-          export KUBECONFIG=~/.kube/devops-pipeline-config
-          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-
-      # Pinning an exact version here instead of pointing at "stable" means
-      # this install behaves the same way every single time it runs, rather
-      # than quietly picking up whatever ArgoCD happens to release next.
-      - name: Install ArgoCD
-        if: inputs.action == 'apply'
-        run: |
-          export KUBECONFIG=~/.kube/devops-pipeline-config
-          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.2/manifests/install.yaml
-
-      # ArgoCD's own components take a little while to come up after being
-      # applied, so this waits until they're actually ready instead of just
-      # assuming they are and moving on to whatever step comes next.
-      - name: Wait for ArgoCD to come up
-        if: inputs.action == 'apply'
-        run: |
-          export KUBECONFIG=~/.kube/devops-pipeline-config
-          kubectl wait --for=condition=available --timeout=180s deployment/argocd-server -n argocd
-          kubectl wait --for=condition=available --timeout=180s deployment/argocd-repo-server -n argocd
-
-      # These three manifests are what actually tell ArgoCD about our app -
-      # without this step, ArgoCD would be up and running but managing
-      # nothing at all. Same reasoning as the namespaces above: a fresh
-      # server has none of this registered yet, so it has to happen here
-      # every time, not just once by hand.
-      - name: Register the three environment Applications with ArgoCD
-        if: inputs.action == 'apply'
-        # This job defaults to running inside terraform/, but the argocd/
-        # folder lives at the repo root - without this override, kubectl
-        # would look for terraform/argocd/dev-application.yaml instead.
-        working-directory: ${{ github.workspace }}
-        run: |
-          export KUBECONFIG=~/.kube/devops-pipeline-config
-          kubectl apply -f argocd/dev-application.yaml
-          kubectl apply -f argocd/staging-application.yaml
-          kubectl apply -f argocd/production-application.yaml
-
-      - name: Save the freshly generated kubeconfig as a repo secret
-        if: inputs.action == 'apply'
+        working-directory: ansible
         env:
-          GH_TOKEN: ${{ secrets.ADMIN_PAT }}
-        run: |
-          KUBECONFIG_B64=$(base64 -w 0 ~/.kube/devops-pipeline-config)
-          gh secret set KUBECONFIG_B64 --body "$KUBECONFIG_B64"
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        run: ./deploy-jenkins.sh
 
       - name: Take the temporary SSH and API access back out
         if: always() && inputs.action == 'apply'
         run: |
           aws ec2 revoke-security-group-ingress \
-            --group-id ${{ steps.sg.outputs.id }} \
+            --group-id ${{ steps.app_sg.outputs.id }} \
             --protocol tcp --port 22 \
             --cidr ${{ steps.runner_ip.outputs.cidr }} || true
           aws ec2 revoke-security-group-ingress \
-            --group-id ${{ steps.sg.outputs.id }} \
+            --group-id ${{ steps.app_sg.outputs.id }} \
             --protocol tcp --port 6443 \
+            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ steps.jenkins_sg.outputs.id }} \
+            --protocol tcp --port 22 \
             --cidr ${{ steps.runner_ip.outputs.cidr }} || true
 
       # ---------- destroy path ----------
