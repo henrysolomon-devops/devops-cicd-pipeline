@@ -6,8 +6,24 @@
 - name: Install k3s on the pipeline server
   hosts: all
   become: true
+  gather_facts: false
 
   tasks:
+    # A freshly created EC2 instance answers SSH well before it's truly
+    # done booting - cloud-init or an automatic first-boot update can
+    # still restart networking or sshd right out from under a connection
+    # that looked fine a second earlier. This keeps retrying a real
+    # connection until it holds steady, instead of moving on after one
+    # lucky handshake (which is what "Gathering Facts" succeeding once,
+    # then the next task failing with "Shared connection closed", means).
+    - name: Wait until SSH is reliably reachable, not just reachable once
+      wait_for_connection:
+        delay: 10
+        timeout: 180
+
+    - name: Now that the connection is stable, gather facts
+      setup:
+
     - name: Update the apt package cache
       apt:
         update_cache: true

@@ -21,6 +21,7 @@
 - name: Install Jenkins on the Jenkins server
   hosts: all
   become: true
+  gather_facts: false
 
   vars:
     jenkins_home: /var/lib/jenkins
@@ -29,6 +30,17 @@
     plugin_manager_version: "2.15.0"
 
   tasks:
+    # Same reasoning as install-k3s.yml - this box is just as freshly
+    # booted, so it gets the same guard against connecting before sshd
+    # has actually settled down.
+    - name: Wait until SSH is reliably reachable, not just reachable once
+      wait_for_connection:
+        delay: 10
+        timeout: 180
+
+    - name: Now that the connection is stable, gather facts
+      setup:
+
     - name: Update the apt package cache
       apt:
         update_cache: true
