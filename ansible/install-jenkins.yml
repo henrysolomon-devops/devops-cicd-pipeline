@@ -44,6 +44,13 @@
     - name: Update the apt package cache
       apt:
         update_cache: true
+        # A fresh Ubuntu image runs its own unattended-upgrades right
+        # after boot, which holds the dpkg lock for a while. Without
+        # this, Ansible's apt module gives up on that lock almost
+        # immediately - this makes it wait the lock out instead of
+        # failing (or, worse, sitting silently long enough for the SSH
+        # connection itself to be treated as dead).
+        lock_timeout: 180
 
     # Jenkins' current LTS line requires Java 21, and needs Java
     # installed *before* Jenkins itself - installing Jenkins first and
@@ -54,6 +61,7 @@
           - fontconfig
           - openjdk-21-jre
         state: present
+        lock_timeout: 180
 
     # Needed for the pipeline's build stage later - Jenkins itself
     # doesn't touch Docker, but the Jenkinsfile it runs will.
@@ -61,6 +69,7 @@
       apt:
         name: docker.io
         state: present
+        lock_timeout: 180
 
     - name: Add the Jenkins apt signing key
       get_url:
@@ -79,6 +88,7 @@
         name: jenkins
         state: present
         update_cache: true
+        lock_timeout: 180
 
     # apt starts Jenkins immediately after installing it, straight into
     # the interactive setup wizard with zero plugins. Stopping it here

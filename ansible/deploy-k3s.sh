@@ -1,22 +1,55 @@
-#!/usr/bin/env bash
-# Grabs the app server's IP straight from Terraform's own output and
-# uses it everywhere it's needed - the Ansible inventory, the TLS cert,
-# and the kubeconfig - so nothing ever has to be hand-edited when the
-# infrastructure changes. Renamed the variable to APP_SERVER_IP in v7,
-# now that a second server (Jenkins) exists alongside this one.
-set -euo pipefail
+---
+# Installs k3s on the EC2 instance Terraform just created. k3s ships its
+# own install script that handles the binary, the systemd service, and
+# the internal networking in one shot - way less moving parts than a
+# full kubeadm-based Kubernetes install.
+- name: Install k3s on the pipeline server
+  hosts: all
+  become: true
+  gather_facts: false
 
-APP_SERVER_IP=$(terraform -chdir=../terraform output -raw app_server_public_ip)
-echo "Using app server IP: $APP_SERVER_IP"
+  tasks:
+    # A freshly created EC2 instance answers SSH well before it's truly
+    # done booting - cloud-init or an automatic first-boot update can
+    # still restart networking or sshd right out from under a connection
+    # that looked fine a second earlier. This keeps retrying a real
+    # connection until it holds steady, instead of moving on after one
+    # lucky handshake (which is what "Gathering Facts" succeeding once,
+    # then the next task failing with "Shared connection closed", means).
+    - name: Wait until SSH is reliably reachable, not just reachable once
+      wait_for_connection:
+        delay: 10
+        timeout: 180
 
-ansible-playbook -i "${APP_SERVER_IP}," install-k3s.yml \
-  --extra-vars "ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/devops-pipeline-key tls_san=${APP_SERVER_IP}"
+    - name: Now that the connection is stable, gather facts
+      setup:
 
-echo "Fetching kubeconfig..."
-mkdir -p ~/.kube
-ssh -i ~/.ssh/devops-pipeline-key -o StrictHostKeyChecking=accept-new \
-  ubuntu@"$APP_SERVER_IP" "sudo cat /etc/rancher/k3s/k3s.yaml" > ~/.kube/devops-pipeline-config
-sed -i "s/127.0.0.1/${APP_SERVER_IP}/" ~/.kube/devops-pipeline-config
+    - name: Update the apt package cache
+      apt:
+        update_cache: true
+        # Same reasoning as install-jenkins.yml - waits out cloud-init's
+        # own first-boot apt/unattended-upgrades activity instead of
+        # racing it.
+        lock_timeout: 180
 
-echo "Done. Run this to use kubectl/helm against this cluster:"
-echo "  export KUBECONFIG=~/.kube/devops-pipeline-config"
+    - name: Download and run the official k3s install script
+      shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--tls-san {{ tls_san }}" sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Wait for the k3s service to be active
+      systemd:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Wait until the node reports Ready
+      shell: k3s kubectl get nodes
+      register: node_status
+      until: "'Ready' in node_status.stdout"
+      retries: 10
+      delay: 5
+
+    - name: Show the node status
+      debug:
+        var: node_status.stdout_lines
