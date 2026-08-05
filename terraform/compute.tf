@@ -56,16 +56,17 @@ resource "aws_eip" "app_server" {
   }
 }
 
-# New in v7: a small, separate instance that only runs Jenkins. Kept
-# deliberately lightweight - it's not running Kubernetes or anything
-# else, just building images and driving the pipeline, so t3.micro is
-# plenty. Living in its own instance (rather than alongside k3s on
-# app_server) keeps the two concerns cleanly separated, the same way
-# CI servers and the clusters they deploy to are usually split apart
-# in real infrastructure.
+# New in v7: a small, separate instance that only runs Jenkins. Started
+# out as t3.micro, but that turned out to be too tight - 1GB of RAM
+# wasn't enough headroom for apt, Docker, and the various tool downloads
+# happening during install, and it caused sshd itself to get killed
+# mid-task. Bumped to t3.small, the same lesson v6 already learned with
+# ArgoCD on the app server (t3.small there wasn't enough either, ended
+# up on t3.medium) - Jenkins doesn't need nearly as much as a full k3s
+# and ArgoCD stack, but a bare 1GB was still too little.
 resource "aws_instance" "jenkins_server" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t3.micro"
+  instance_type          = "t3.small"
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.jenkins_server.id]
   key_name               = aws_key_pair.devops_pipeline.key_name
