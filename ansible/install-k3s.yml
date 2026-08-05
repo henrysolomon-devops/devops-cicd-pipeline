@@ -27,6 +27,10 @@
     - name: Update the apt package cache
       apt:
         update_cache: true
+        # Same reasoning as install-jenkins.yml - waits out cloud-init's
+        # own first-boot apt/unattended-upgrades activity instead of
+        # racing it.
+        lock_timeout: 180
 
     - name: Download and run the official k3s install script
       shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--tls-san {{ tls_san }}" sh -
