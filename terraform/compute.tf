@@ -37,6 +37,24 @@ resource "aws_instance" "app_server" {
   vpc_security_group_ids = [aws_security_group.app_server.id]
   key_name               = aws_key_pair.devops_pipeline.key_name
 
+  # A fresh Ubuntu image runs its own unattended-upgrades shortly after
+  # boot, which can hold the apt lock or even trigger an automatic
+  # reboot right in the middle of the Ansible install that follows a
+  # few minutes later - almost certainly what was cutting SSH
+  # connections off mid-task during testing. Since this server gets
+  # torn down and rebuilt from scratch on every destroy/apply cycle
+  # anyway, there's no benefit to it patching itself on its own
+  # schedule - Ansible reinstalls everything fresh every time regardless.
+  user_data = <<-EOF
+    #!/bin/bash
+    systemctl stop unattended-upgrades.service 2>/dev/null || true
+    systemctl disable unattended-upgrades.service 2>/dev/null || true
+    systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    echo 'APT::Periodic::Unattended-Upgrade "0";' > /etc/apt/apt.conf.d/20auto-upgrades
+    echo 'APT::Periodic::Update-Package-Lists "0";' >> /etc/apt/apt.conf.d/20auto-upgrades
+  EOF
+
   tags = {
     Name = "devops-pipeline-app-server"
   }
@@ -69,6 +87,19 @@ resource "aws_instance" "jenkins_server" {
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.jenkins_server.id]
   key_name               = aws_key_pair.devops_pipeline.key_name
+
+  # Same reasoning as app_server above - disables the fresh image's own
+  # automatic updates and reboot before Ansible ever gets a chance to
+  # race against them.
+  user_data = <<-EOF
+    #!/bin/bash
+    systemctl stop unattended-upgrades.service 2>/dev/null || true
+    systemctl disable unattended-upgrades.service 2>/dev/null || true
+    systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    echo 'APT::Periodic::Unattended-Upgrade "0";' > /etc/apt/apt.conf.d/20auto-upgrades
+    echo 'APT::Periodic::Update-Package-Lists "0";' >> /etc/apt/apt.conf.d/20auto-upgrades
+  EOF
 
   tags = {
     Name = "devops-pipeline-jenkins-server"
