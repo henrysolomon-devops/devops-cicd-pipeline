@@ -5,6 +5,11 @@
 # JCasC itself - without this, jenkins.yaml would just sit there unread.
 configuration-as-code
 
+# Provides the "None" security realm implementation used in
+# jenkins.yaml - without this, JCasC throws "No SecurityRealm
+# implementation found for none" and fails to apply the config at all.
+configuration-as-code-support
+
 # Lets Jenkins check out this repo over plain HTTPS (it's public, so no
 # credential is needed just to read it).
 git

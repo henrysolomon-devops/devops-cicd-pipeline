@@ -13,6 +13,14 @@
 jenkins:
   systemMessage: "devops-cicd-pipeline - Jenkins (v7), rebuilt automatically from jenkins/jenkins.yaml on every destroy/apply cycle."
   numExecutors: 2
+  # Explicitly disabling security, rather than just omitting these two
+  # keys - leaving them out entirely turned out to *not* mean "wide
+  # open" in practice, Jenkins still asked for a login nobody had ever
+  # set a password for. This is the actual, explicit way to say "no
+  # login at all," which needs the configuration-as-code-support
+  # plugin below to work (see jenkins/plugins.txt).
+  securityRealm: None
+  authorizationStrategy: unsecured
 
 # The one real secret this whole file needs: a GitHub PAT with
 # packages:write, used later in the Jenkinsfile to push images to
