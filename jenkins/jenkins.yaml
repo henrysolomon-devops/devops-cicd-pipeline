@@ -54,4 +54,13 @@ jobs:
             scriptPath('Jenkinsfile')
           }
         }
+        triggers {
+          // Polls GitHub every 2 minutes for new commits on main and
+          // starts a build if it finds one. Chose polling over a
+          // GitHub webhook on purpose - a webhook would mean opening
+          // this server's security group to GitHub's IP ranges, but
+          // polling only ever reaches out, so the existing "only my
+          // own IP can reach in" rule doesn't have to change at all.
+          scm('H/2 * * * *')
+        }
       }
