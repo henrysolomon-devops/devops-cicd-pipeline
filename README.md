@@ -15,8 +15,8 @@ The goal isn't just to run the commands, but to understand why each tool is used
 | v5.0 | Terraform (EC2 + VPC) + Ansible (k3s install) | Infrastructure as Code, Configuration Management | ✅ Done |
 | v5.1 | GitHub Actions deploy to the v5 EC2/k3s server | Extending existing CI/CD to a real cloud target | ✅ Done |
 | v6.0 | ArgoCD | GitOps-based Continuous Deployment | ✅ Done |
-| v7.0 | Jenkins pipeline (alternative to Actions) | Alternative CI tooling | 🔜 Next |
-| v8.0 | Prometheus + Grafana | Observability & monitoring | ⏳ Planned |
+| v7.0 | Jenkins pipeline (alternative to Actions) | Alternative CI tooling | ✅ Done |
+| v8.0 | Prometheus + Grafana | Observability & monitoring | 🔜 Next |
 | v9.0 | Load Balancer + AWS CloudFormation | Networking, alternative IaC | ⏳ Planned |
 
 ## Project structure
@@ -31,7 +31,7 @@ Each tool gets its own folder at the repo root, added as the version that introd
     ├── terraform/   # Infrastructure as Code (v5, remote state added in v5.1)
     ├── ansible/     # Configuration management (v5)
     ├── argocd/      # GitOps application definitions (v6)
-    ├── jenkins/     # Jenkins pipeline (v7, not yet added)
+    ├── jenkins/     # Jenkins pipeline (v7)
     ├── monitoring/  # Prometheus + Grafana configs (v8, not yet added)
     └── docs/        # Detailed per-version guides (setup, testing, reasoning)
 
@@ -76,6 +76,12 @@ The local `kind` cluster and self-hosted runner are retired. All three environme
 Deployment moved from GitHub Actions pushing directly into the cluster, to ArgoCD pulling from this repo and applying changes on its own. Each environment's desired image tag now lives in its own values file (`values-dev.yaml`, `values-staging.yaml`, `values-production.yaml`), and ArgoCD keeps the cluster in sync with whatever those files say. dev updates automatically the moment a build finishes; staging and production are promoted by hand through a dedicated `promote.yml` workflow, and reviewing/merging the resulting pull request is what actually approves the change - no kubeconfig, security group access, or AWS credential is needed anywhere in the deploy pipeline anymore.
 
 📄 [Full guide: setup, testing, and reasoning](./docs/v6-argocd.md)
+
+## v7: Jenkins (alternative CI/CD pipeline)
+
+A second EC2 instance, `jenkins-server`, runs a fully self-hosted Jenkins controller, configured entirely from code via JCasC - no manual setup wizard, no clicking through "Manage Jenkins" by hand. Deployment moves back to a push model: Jenkins builds and pushes the image, then deploys directly to dev, staging, and production with its own native approval gates, replacing `deploy.yml` and `promote.yml` entirely. GitHub Actions' role narrows to just `infra.yml` - provisioning and tearing down the AWS infrastructure itself. ArgoCD and the pull-based model from v6 remain fully intact on the `v6.0.0` tag.
+
+📄 [Full guide: setup, testing, and reasoning](./docs/v7-jenkins.md)
 
 ## License
 
