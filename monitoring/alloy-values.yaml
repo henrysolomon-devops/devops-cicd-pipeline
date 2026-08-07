@@ -1,0 +1,67 @@
+# Values for the official grafana/alloy Helm chart. Alloy is the log collector
+# that actually reads container logs off the Node and ships them to Loki - Loki
+# itself only stores and indexes what it's given, it doesn't go looking for logs
+# on its own. Alloy replaced the older Promtail, which reached end-of-life on
+# March 2, 2026.
+controller:
+  # A DaemonSet runs one Alloy Pod per Node, which is what lets it read every
+  # other Pod's log files directly off that same Node's filesystem. With only
+  # one Node in this cluster, that's a single Alloy Pod - but written as a
+  # DaemonSet rather than a plain Deployment so the architecture is still
+  # correct if this project ever moved to more than one Node.
+  type: daemonset
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+# The actual collection and forwarding logic, written in Alloy's own
+# configuration language. In short: discover every Pod on the cluster through
+# the Kubernetes API, read each one's logs, and push them all to Loki - with
+# the Pod's own namespace, pod name, and container name attached as labels, so
+# Grafana's Explore tab (and the $environment dropdown already used on the app
+# dashboard) can filter by exactly the same dev/staging/production split
+# already used everywhere else in this project.
+alloy:
+  configMap:
+    content: |
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.write.default.receiver]
+      }
+
+      # Points at Loki's own Service directly, the same
+      # http://loki.monitoring.svc.cluster.local:3100 address already
+      # registered as Grafana's Loki datasource in monitoring/values.yaml -
+      # this assumes Loki gets installed under the Helm release name "loki",
+      # into the "monitoring" namespace, in infra.yml.
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+        }
+      }

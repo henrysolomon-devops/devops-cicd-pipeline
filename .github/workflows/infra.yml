@@ -137,7 +137,22 @@ jobs:
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo update
 
-      - name: Install kube-prometheus-stack (Prometheus + Grafana)
+      # New in v8.1: renders the real Slack webhook URLs into a throwaway copy
+      # of monitoring/alertmanager-config.yaml, right here on the runner's own
+      # disk, replacing the __SLACK_WEBHOOK_INFRA__/__SLACK_WEBHOOK_APP__
+      # placeholders that are all that's ever committed to Git. This rendered
+      # file only ever exists for the lifetime of this job and is never logged,
+      # committed, or uploaded as an artifact.
+      - name: Render the Alertmanager Slack webhook config
+        if: inputs.action == 'apply'
+        working-directory: ${{ github.workspace }}
+        run: |
+          sed \
+            -e "s|__SLACK_WEBHOOK_INFRA__|${{ secrets.SLACK_WEBHOOK_INFRA }}|" \
+            -e "s|__SLACK_WEBHOOK_APP__|${{ secrets.SLACK_WEBHOOK_APP }}|" \
+            monitoring/alertmanager-config.yaml > monitoring/alertmanager-config.rendered.yaml
+
+      - name: Install kube-prometheus-stack (Prometheus + Grafana + Alertmanager)
         if: inputs.action == 'apply'
         working-directory: ${{ github.workspace }}
         run: |
@@ -146,6 +161,49 @@ jobs:
             --version 88.1.5 \
             --namespace monitoring --create-namespace \
             -f monitoring/values.yaml \
+            -f monitoring/alertmanager-config.rendered.yaml \
+            --wait --timeout 10m
+
+      # New in v8.1. Applied right after kube-prometheus-stack, since that's
+      # what installs the PrometheusRule CRD this file depends on - same
+      # ordering reason the ServiceMonitor CRD had to come before ArgoCD back
+      # in v8.
+      - name: Apply the infra-level alerting rules
+        if: inputs.action == 'apply'
+        working-directory: ${{ github.workspace }}
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          kubectl apply -f monitoring/prometheusrule-infra.yaml
+
+      # New in v8.1: Loki (log storage) and Alloy (the collector that actually
+      # reads Pod logs and ships them to Loki). Installed from the grafana Helm
+      # repo, into the same monitoring namespace as Prometheus and Grafana.
+      - name: Add the grafana Helm repo
+        if: inputs.action == 'apply'
+        run: |
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo update
+
+      - name: Install Loki
+        if: inputs.action == 'apply'
+        working-directory: ${{ github.workspace }}
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          helm upgrade --install loki grafana/loki \
+            --version 6.27.0 \
+            --namespace monitoring --create-namespace \
+            -f monitoring/loki-values.yaml \
+            --wait --timeout 10m
+
+      - name: Install Grafana Alloy
+        if: inputs.action == 'apply'
+        working-directory: ${{ github.workspace }}
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          helm upgrade --install alloy grafana/alloy \
+            --version 0.12.5 \
+            --namespace monitoring --create-namespace \
+            -f monitoring/alloy-values.yaml \
             --wait --timeout 10m
 
       # Restored from v6, unchanged in spirit from before Jenkins

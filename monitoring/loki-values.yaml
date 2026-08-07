@@ -1,0 +1,66 @@
+# Values for the official grafana/loki Helm chart. Deployed in single-binary mode
+# since this project only ever runs on one Node - the "simple scalable" or
+# microservices deployment modes exist for splitting Loki's read/write/backend
+# paths across many machines, which would just be unused complexity here.
+deploymentMode: SingleBinary
+
+loki:
+  # No built-in auth (Grafana's own multi-tenant login system) in front of Loki
+  # itself - the same reasoning already used for Jenkins in v7 and Grafana in v8:
+  # access is already restricted at the network level, to a single IP, at the
+  # security group. An extra login layer on top of that would be friction with
+  # no real security benefit for a single-operator portfolio project.
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+
+  # Points Loki at the S3 bucket created by hand outside Terraform (see iam.tf
+  # for why it isn't managed here) instead of the default local filesystem, which
+  # would be wiped out on every terraform destroy along with the EC2 instance
+  # itself. Credentials are never set explicitly - the AWS SDK inside Loki's
+  # container picks up the IAM Instance Profile attached to the EC2 instance
+  # automatically, through the instance metadata service, the same way any AWS
+  # CLI command running on that box already would.
+  storage:
+    type: s3
+    bucketNames:
+      chunks: devops-cicd-pipeline-loki-logs
+      ruler: devops-cicd-pipeline-loki-logs
+      admin: devops-cicd-pipeline-loki-logs
+    s3:
+      region: us-east-1
+
+  # The 14-day S3 lifecycle rule already deletes the underlying chunk files, but
+  # without a matching retention setting here, Loki's own index would keep
+  # referencing chunks that no longer exist. Setting it to the same 14 days keeps
+  # Loki's internal bookkeeping consistent with what's actually still in the
+  # bucket, and lets the compactor clean up its own index entries on the same
+  # schedule instead of accumulating stale references forever.
+  limits_config:
+    retention_period: 336h
+
+  compactor:
+    retention_enabled: true
+
+# A single-binary deployment doesn't need Loki's own object-storage cache tier,
+# gateway, or the various per-component autoscalers that the scalable/microservices
+# modes ship with - all left at their chart defaults (disabled) rather than turned
+# on and then never used.
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# The chart also bundles its own MinIO instance for local/dev testing storage.
+# Not needed here since real S3 is already doing that job.
+minio:
+  enabled: false
+
+gateway:
+  enabled: false

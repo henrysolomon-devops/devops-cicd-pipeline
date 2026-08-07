@@ -15,6 +15,15 @@ prometheus:
     serviceMonitorSelectorNilUsesHelmValues: false
     serviceMonitorNamespaceSelector: {}
 
+    # Added in v8.1, same reasoning as the two lines above: by default Prometheus
+    # only picks up PrometheusRule objects carrying its own Helm release label,
+    # and only from its own namespace. The app-level rules live in
+    # dev/staging/production (via the devops-pipeline chart) and the infra-level
+    # rules live right here in monitoring but without that label - both would be
+    # silently ignored without this.
+    ruleSelectorNilUsesHelmValues: false
+    ruleNamespaceSelector: {}
+
     # How long Prometheus keeps scraped data before dropping it. Since
     # the server itself is never left running between tests (see the
     # project's cost/safety rules), this number barely matters in
@@ -30,11 +39,33 @@ prometheus:
         cpu: 500m
         memory: 1Gi
 
-# Alertmanager is intentionally left disabled here. Alerting is planned
-# for v8.1, alongside a log-aggregation tool, once there's actually
-# something useful to correlate an alert against - see docs/v8-observability.md.
-alertmanager:
+# Enabled in v8.1, now that there's actually something useful to alert on and
+# somewhere for those alerts to go. The routing itself (which alert goes to which
+# Slack channel) is deliberately kept out of this file and lives in
+# monitoring/alertmanager-config.yaml instead, merged in as a second -f flag when
+# infra.yml runs Helm - that keeps the always-static chart config here separate
+# from the file that has secrets substituted into it at apply time.
+# Added in v8.1: kube-prometheus-stack ships default ServiceMonitors and
+# alerting rules for kube-scheduler, kube-controller-manager, etcd, and
+# kube-proxy - all written for a standard kubeadm cluster. k3s doesn't expose
+# any of these the same way (etcd in particular isn't reachable on the port
+# the chart expects), so these targets sit permanently "down". That was
+# harmless back in v8 with Alertmanager disabled, but now that it's enabled,
+# every one of those false targets would fire a TargetDown alert with no
+# `team` label, fall through to the default route, and flood #alerts-app with
+# noise that has nothing to do with this project's own app or infra alerts.
+# Disabling them here is the standard fix for kube-prometheus-stack on k3s.
+kubeScheduler:
   enabled: false
+kubeControllerManager:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+alertmanager:
+  enabled: true
 
 grafana:
   service:
@@ -57,6 +88,19 @@ grafana:
       # grafana_dashboard: "1" label set in the app chart's
       # grafana-dashboard-configmap.yaml template.
       label: grafana_dashboard
+
+  # Registers Loki as a queryable datasource in Grafana, added in v8.1. This is
+  # what makes the "Explore" tab (and any log panel added to a dashboard later)
+  # actually able to pull log lines back. The URL assumes Loki gets installed
+  # with the Helm release name "loki" into the "monitoring" namespace in
+  # infra.yml, since gateway.enabled is false in loki-values.yaml, this points
+  # straight at Loki's own Service rather than a gateway in front of it.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      isDefault: false
 
   # No login screen. This mirrors the exact reasoning used for Jenkins
   # in v7 (securityRealm: None there): access to this port is already
