@@ -27,9 +27,9 @@
     - name: Update the apt package cache
       apt:
         update_cache: true
-        # Same reasoning as install-jenkins.yml - waits out cloud-init's
-        # own first-boot apt/unattended-upgrades activity instead of
-        # racing it.
+        # Waits out cloud-init's own first-boot apt/unattended-upgrades
+        # activity on a freshly launched instance, rather than racing it
+        # and hitting a lock error.
         lock_timeout: 180
 
     - name: Download and run the official k3s install script
