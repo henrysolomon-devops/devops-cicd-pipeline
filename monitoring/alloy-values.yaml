@@ -55,11 +55,11 @@ alloy:
         forward_to = [loki.write.default.receiver]
       }
 
-      # Points at Loki's own Service directly, the same
-      # http://loki.monitoring.svc.cluster.local:3100 address already
-      # registered as Grafana's Loki datasource in monitoring/values.yaml -
-      # this assumes Loki gets installed under the Helm release name "loki",
-      # into the "monitoring" namespace, in infra.yml.
+      // Points at Loki's own Service directly, the same
+      // http://loki.monitoring.svc.cluster.local:3100 address already
+      // registered as Grafana's Loki datasource in monitoring/values.yaml -
+      // this assumes Loki gets installed under the Helm release name "loki",
+      // into the "monitoring" namespace, in infra.yml.
       loki.write "default" {
         endpoint {
           url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
