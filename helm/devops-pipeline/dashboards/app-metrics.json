@@ -1,20 +1,11 @@
 {
-  "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "Prometheus",
-      "description": "This points at whichever Prometheus datasource kube-prometheus-stack registers automatically, so nothing here needs to be hardcoded to a specific datasource UID.",
-      "type": "datasource",
-      "pluginId": "prometheus"
-    }
-  ],
   "title": "devops-pipeline: App Metrics (v8)",
   "uid": "devops-pipeline-app-metrics",
   "description": "Custom application-level dashboard for the Flask app, covering request traffic and latency, the Open-Meteo external dependency, and the Redis cache in front of it. This is separate from the default Kubernetes/node dashboards that ship with kube-prometheus-stack.",
   "tags": ["devops-pipeline", "v8", "application"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": {
     "from": "now-1h",
@@ -42,7 +33,6 @@
       "type": "timeseries",
       "title": "Request Rate by Endpoint",
       "description": "Shows how many requests per second each route (/, /api/status, /health, /api/weather) is receiving, in the selected namespace. A flat line near zero is expected for a portfolio demo; spikes should line up with whenever the app is actually being poked or tested.",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
@@ -60,7 +50,6 @@
       "type": "timeseries",
       "title": "Request Latency (p95) by Endpoint",
       "description": "The 95th percentile response time per route, calculated from the http_request_duration_seconds histogram. This is a better signal than an average, since it shows the slow tail of requests rather than hiding it behind fast, typical ones.",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "targets": [
         {
@@ -78,7 +67,6 @@
       "type": "timeseries",
       "title": "HTTP Responses by Status Code",
       "description": "Breaks down request volume by status code (200, 4xx, 5xx, and so on), which makes it easy to spot the moment error responses start showing up instead of having to dig through logs first.",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "targets": [
         {
@@ -96,7 +84,6 @@
       "type": "timeseries",
       "title": "Open-Meteo Call Duration (p95)",
       "description": "How long the app waits on Open-Meteo itself, on the rare occasions it actually has to make that call rather than serving from the Redis cache. Consistently low numbers here confirm the external dependency is healthy.",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "targets": [
         {
@@ -114,7 +101,6 @@
       "type": "stat",
       "title": "Open-Meteo Error Rate",
       "description": "Counts failed calls to Open-Meteo (timeouts, non-2xx responses) over the last five minutes. This should sit at zero almost all the time; anything above that is worth investigating.",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "targets": [
         {
@@ -141,7 +127,6 @@
       "type": "gauge",
       "title": "Redis Cache Hit Ratio",
       "description": "The share of weather requests served straight from Redis instead of triggering a fresh Open-Meteo call. Since the cache TTL is short, this ratio naturally drops toward zero right after each expiry and climbs back up as repeat requests come in, which is expected behavior rather than a problem.",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "targets": [
         {
