@@ -57,6 +57,19 @@ singleBinary:
       cpu: 500m
       memory: 512Mi
 
+# The chart's own default values still set nonzero replicas for the "simple
+# scalable" components (read/write/backend) even when deploymentMode is
+# SingleBinary - these three have to be zeroed out explicitly, or the chart's
+# own validation step refuses to install at all, since having both modes
+# "configured" at once (nonzero replicas on both sides) usually means a mistake
+# rather than an intentional setup.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
 # The chart also bundles its own MinIO instance for local/dev testing storage.
 # Not needed here since real S3 is already doing that job.
 minio:
