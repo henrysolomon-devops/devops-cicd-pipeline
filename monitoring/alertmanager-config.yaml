@@ -1,0 +1,51 @@
+# This file merges into kube-prometheus-stack's own values (passed to Helm as a
+# second -f flag alongside monitoring/values.yaml), specifically under the
+# alertmanager.config key that chart already expects.
+#
+# The two Slack webhook URLs below are left as placeholders - __SLACK_WEBHOOK_INFRA__
+# and __SLACK_WEBHOOK_APP__ - and never committed as real values. infra.yml
+# substitutes them at apply time, right before running Helm, using the
+# SLACK_WEBHOOK_INFRA and SLACK_WEBHOOK_APP repo secrets, the same pattern already
+# used for injecting the SSH private key in v5 and the GHCR PAT in v7.
+alertmanager:
+  config:
+    # Alerts are grouped by alertname and namespace so that, for example, five
+    # Pods crash-looping in staging at once shows up as one grouped notification
+    # instead of five separate messages flooding the channel.
+    route:
+      receiver: "slack-app"
+      group_by: ["alertname", "namespace"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+
+      # Every PrometheusRule this project defines carries a `team: infra` or
+      # `team: app` label specifically so this routing can split cleanly - see
+      # monitoring/prometheusrule-infra.yaml and
+      # helm/devops-pipeline/templates/prometheusrule-app.yaml. Anything that
+      # somehow arrives without a matching label falls through to the top-level
+      # receiver above (slack-app), rather than being silently dropped.
+      routes:
+        - match:
+            team: infra
+          receiver: "slack-infra"
+        - match:
+            team: app
+          receiver: "slack-app"
+
+    receivers:
+      - name: "slack-infra"
+        slack_configs:
+          - api_url: "__SLACK_WEBHOOK_INFRA__"
+            channel: "#alerts-infra"
+            send_resolved: true
+            title: "{{ .CommonLabels.alertname }}"
+            text: "{{ .CommonAnnotations.description }}"
+
+      - name: "slack-app"
+        slack_configs:
+          - api_url: "__SLACK_WEBHOOK_APP__"
+            channel: "#alerts-app"
+            send_resolved: true
+            title: "{{ .CommonLabels.alertname }}"
+            text: "{{ .CommonAnnotations.description }}"

@@ -36,6 +36,29 @@ resource "aws_instance" "server" {
   vpc_security_group_ids = [aws_security_group.server.id]
   key_name               = aws_key_pair.devops_pipeline.key_name
 
+  # Added in v8.1. This is what actually lets Loki, running inside k3s on this
+  # instance, reach the manually-created S3 bucket for log storage - the role
+  # and its scoped policy are defined in iam.tf, this line is just what attaches
+  # the resulting Instance Profile to the server itself. Changing this value
+  # doesn't force AWS to replace the instance; it's applied as an in-place
+  # association, the same way you could swap it from the AWS Console without
+  # stopping the server.
+  iam_instance_profile = aws_iam_instance_profile.loki_s3_access.name
+
+  # Added in v8.1. AWS defaults the IMDS hop limit to 1, which is enough for a
+  # process running directly on the host, but Loki runs one network layer
+  # deeper - inside a container, inside k3s, on this same instance. That extra
+  # hop means the default limit silently blocks Loki from ever reaching the
+  # metadata service, so it would never actually get real AWS credentials
+  # despite the IAM Instance Profile above being attached correctly. Raising
+  # this to 2 is the standard fix for any containerized workload that needs
+  # instance-role credentials without IRSA.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
   # Added in v8. The AMI's default root volume (under 8GB) was never a
   # problem before, but pulling every image for k3s, ArgoCD, and the
   # full kube-prometheus-stack (Prometheus, Grafana, node-exporter,

@@ -7,7 +7,7 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
-# My own public IP, so SSH, the k3s API, and (new in v7) the Jenkins
+# My own public IP, so SSH, the k3s API
 # UI are only reachable from me, not the whole internet. No default on
 # purpose - this depends on whoever's running the code, so it has to
 # be passed in each time.

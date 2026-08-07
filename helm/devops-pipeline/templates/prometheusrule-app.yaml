@@ -1,0 +1,89 @@
+# App-level alerting rules, added in v8.1. Every rule here carries a
+# `team: app` label specifically so monitoring/alertmanager-config.yaml can route
+# it straight to the #alerts-app Slack channel, separately from the
+# infra-level rules in monitoring/prometheusrule-infra.yaml.
+#
+# Gated behind the same enabled toggle pattern already used for
+# serviceMonitor.enabled in values.yaml, and needs kube-prometheus-stack's CRDs
+# to already exist on the cluster - same requirement as templates/servicemonitor.yaml.
+{{- if .Values.alerting.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "devops-pipeline.fullname" . }}-app-alerts
+  labels:
+    {{- include "devops-pipeline.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: devops-pipeline.app
+      rules:
+        # More than 5% of requests returning a 5xx in the last 5 minutes. Uses a
+        # ratio rather than a raw count so this fires the same way regardless of
+        # how much traffic a namespace happens to be getting at the time.
+        - alert: HighHttpErrorRate
+          expr: |
+            sum(rate(http_requests_total{namespace=~"dev|staging|production", status=~"5.."}[5m])) by (namespace)
+            /
+            sum(rate(http_requests_total{namespace=~"dev|staging|production"}[5m])) by (namespace)
+            > 0.05
+          for: 5m
+          labels:
+            team: app
+            severity: warning
+          annotations:
+            summary: "High HTTP error rate in {{`{{ $labels.namespace }}`}}"
+            description: "Over 5% of requests in {{`{{ $labels.namespace }}`}} have returned a 5xx response over the last 5 minutes."
+
+        # p95 latency on the Open-Meteo call itself, not the app's own response
+        # time - this isolates a slow third-party dependency from a slow app.
+        - alert: OpenMeteoSlowResponses
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(external_api_call_duration_seconds_bucket{namespace=~"dev|staging|production", api="open-meteo"}[5m])) by (le, namespace)
+            ) > 2
+          for: 5m
+          labels:
+            team: app
+            severity: warning
+          annotations:
+            summary: "Open-Meteo calls are slow in {{`{{ $labels.namespace }}`}}"
+            description: "p95 Open-Meteo call duration in {{`{{ $labels.namespace }}`}} has been above 2 seconds for 5 minutes."
+
+        # Any Open-Meteo failure at all is worth knowing about, since the app
+        # already degrades gracefully on the dashboard - this is the only signal
+        # that tells you the degradation is actually happening.
+        - alert: OpenMeteoErrors
+          expr: |
+            sum(rate(external_api_call_errors_total{namespace=~"dev|staging|production", api="open-meteo"}[5m])) by (namespace)
+            > 0
+          for: 5m
+          labels:
+            team: app
+            severity: warning
+          annotations:
+            summary: "Open-Meteo call errors in {{`{{ $labels.namespace }}`}}"
+            description: "Calls to Open-Meteo from {{`{{ $labels.namespace }}`}} have been failing for the last 5 minutes."
+
+        # A sustained low hit ratio means Redis itself is likely down or
+        # unreachable, not just a normal post-TTL dip (which self-corrects within
+        # seconds) - the 15m window is deliberately longer than the other rules to
+        # avoid firing on that normal, expected dip.
+        - alert: LowCacheHitRatio
+          expr: |
+            (
+              sum(rate(cache_hits_total{namespace=~"dev|staging|production"}[15m])) by (namespace)
+              /
+              (
+                sum(rate(cache_hits_total{namespace=~"dev|staging|production"}[15m])) by (namespace)
+                +
+                sum(rate(cache_misses_total{namespace=~"dev|staging|production"}[15m])) by (namespace)
+              )
+            ) < 0.3
+          for: 15m
+          labels:
+            team: app
+            severity: info
+          annotations:
+            summary: "Low Redis cache hit ratio in {{`{{ $labels.namespace }}`}}"
+            description: "The weather cache hit ratio in {{`{{ $labels.namespace }}`}} has stayed below 30% for 15 minutes - possibly Redis itself is unreachable rather than a normal TTL dip."
+{{- end }}

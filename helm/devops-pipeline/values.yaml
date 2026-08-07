@@ -119,3 +119,12 @@ serviceMonitor:
 # not once per namespace - see templates/grafana-dashboard-configmap.yaml.
 grafanaDashboard:
   enabled: false
+
+# Added in v8.1: controls whether this Release installs the app-level
+# PrometheusRule (error rate, Open-Meteo latency/errors, cache hit ratio -
+# see templates/prometheusrule-app.yaml). Left on for every environment,
+# unlike grafanaDashboard above, since alerting genuinely needs to run once
+# per namespace - a slow Open-Meteo call in production shouldn't go unnoticed
+# just because dev already has its own copy of this rule.
+alerting:
+  enabled: true

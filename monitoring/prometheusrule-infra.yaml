@@ -1,0 +1,70 @@
+# Infra-level alerting rules, added in v8.1. Every rule here carries a
+# `team: infra` label so monitoring/alertmanager-config.yaml routes it to
+# #alerts-infra, separately from the app-level rules in
+# helm/devops-pipeline/templates/prometheusrule-app.yaml.
+#
+# Applied directly with `kubectl apply -f`, the same way as the three
+# argocd/*.yaml Application manifests - this isn't tied to any single Helm
+# Release, it watches the whole cluster, so it doesn't belong inside a chart
+# that only ever deploys to one namespace at a time.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: devops-pipeline-infra-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: devops-cicd-pipeline
+spec:
+  groups:
+    - name: devops-pipeline.infra
+      rules:
+        # The exact class of problem that broke ArgoCD's own install back in v8
+        # (kubectl reporting DiskPressure, Pods getting evicted) - this is what
+        # would have caught it automatically instead of being found by hand.
+        - alert: NodeDiskPressure
+          expr: kube_node_status_condition{condition="DiskPressure", status="true"} == 1
+          for: 5m
+          labels:
+            team: infra
+            severity: critical
+          annotations:
+            summary: "Disk pressure on {{`{{ $labels.node }}`}}"
+            description: "Node {{`{{ $labels.node }}`}} has reported DiskPressure for 5 minutes - new Pods may already be getting evicted."
+
+        # Same idea, but for memory - the class of problem that forced the
+        # t3.small to t3.medium bump back in v6, before ArgoCD's own components
+        # even had room to run alongside k3s and the app.
+        - alert: NodeMemoryPressure
+          expr: kube_node_status_condition{condition="MemoryPressure", status="true"} == 1
+          for: 5m
+          labels:
+            team: infra
+            severity: critical
+          annotations:
+            summary: "Memory pressure on {{`{{ $labels.node }}`}}"
+            description: "Node {{`{{ $labels.node }}`}} has reported MemoryPressure for 5 minutes."
+
+        # More than 3 container restarts inside a 15-minute window usually means
+        # a genuine crash loop, not a one-off restart from a routine deploy
+        # rollout, which this threshold is deliberately loose enough to ignore.
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace=~"dev|staging|production"}[15m]) > 3
+          for: 5m
+          labels:
+            team: infra
+            severity: warning
+          annotations:
+            summary: "Pod {{`{{ $labels.namespace }}`}}/{{`{{ $labels.pod }}`}} is crash-looping"
+            description: "Container {{`{{ $labels.container }}`}} in {{`{{ $labels.namespace }}`}}/{{`{{ $labels.pod }}`}} has restarted more than 3 times in the last 15 minutes."
+
+        # Catches a Pod that's stuck Pending, Failed, or Unknown rather than just
+        # restarting - the kind of thing a crash-loop alert alone would miss.
+        - alert: PodNotReady
+          expr: kube_pod_status_phase{namespace=~"dev|staging|production", phase=~"Failed|Unknown"} == 1
+          for: 10m
+          labels:
+            team: infra
+            severity: warning
+          annotations:
+            summary: "Pod {{`{{ $labels.namespace }}`}}/{{`{{ $labels.pod }}`}} not ready"
+            description: "Pod {{`{{ $labels.namespace }}`}}/{{`{{ $labels.pod }}`}} has been in phase {{`{{ $labels.phase }}`}} for over 10 minutes."

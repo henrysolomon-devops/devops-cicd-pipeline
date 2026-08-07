@@ -1,11 +1,11 @@
 {
   "title": "devops-pipeline: App Metrics (v8)",
   "uid": "devops-pipeline-app-metrics",
-  "description": "Custom application-level dashboard for the Flask app, covering request traffic and latency, the Open-Meteo external dependency, and the Redis cache in front of it. This is separate from the default Kubernetes/node dashboards that ship with kube-prometheus-stack.",
+  "description": "Custom application-level dashboard for the Flask app, covering request traffic and latency, the Open-Meteo external dependency, the Redis cache in front of it, and (added in v8.1) live logs for the selected namespace. This is separate from the default Kubernetes/node dashboards that ship with kube-prometheus-stack.",
   "tags": ["devops-pipeline", "v8", "application"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "30s",
   "time": {
     "from": "now-1h",
@@ -149,6 +149,27 @@
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "logs",
+      "title": "Live Logs",
+      "description": "Raw log lines for the selected namespace, pulled from Loki via Alloy (added in v8.1). Uses the same $environment dropdown as every metric panel above, so switching it filters both metrics and logs together.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{namespace=\"$environment\"}"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
       }
     }
   ]

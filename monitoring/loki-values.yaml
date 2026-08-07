@@ -1,0 +1,111 @@
+# Values for the official grafana/loki Helm chart. Deployed in single-binary mode
+# since this project only ever runs on one Node - the "simple scalable" or
+# microservices deployment modes exist for splitting Loki's read/write/backend
+# paths across many machines, which would just be unused complexity here.
+deploymentMode: SingleBinary
+
+loki:
+  # No built-in auth (Grafana's own multi-tenant login system) in front of Loki
+  # itself - the same reasoning already used for Jenkins in v7 and Grafana in v8:
+  # access is already restricted at the network level, to a single IP, at the
+  # security group. An extra login layer on top of that would be friction with
+  # no real security benefit for a single-operator portfolio project.
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+
+  # Required for any real (non-test) storage backend - this is what tells Loki
+  # how to actually build its index: which store to use, which object storage
+  # backend, and the schema version. TSDB + v13 is the current recommended
+  # combination for a fresh install. The "from" date only needs to be in the
+  # past relative to when this first gets applied - it marks the point this
+  # schema takes effect, not a real historical cutoff.
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  # Points Loki at the S3 bucket created by hand outside Terraform (see iam.tf
+  # for why it isn't managed here) instead of the default local filesystem, which
+  # would be wiped out on every terraform destroy along with the EC2 instance
+  # itself. Credentials are never set explicitly - the AWS SDK inside Loki's
+  # container picks up the IAM Instance Profile attached to the EC2 instance
+  # automatically, through the instance metadata service, the same way any AWS
+  # CLI command running on that box already would.
+  storage:
+    type: s3
+    bucketNames:
+      chunks: devops-cicd-pipeline-loki-logs
+      ruler: devops-cicd-pipeline-loki-logs
+      admin: devops-cicd-pipeline-loki-logs
+    s3:
+      region: us-east-1
+
+  # The 14-day S3 lifecycle rule already deletes the underlying chunk files, but
+  # without a matching retention setting here, Loki's own index would keep
+  # referencing chunks that no longer exist. Setting it to the same 14 days keeps
+  # Loki's internal bookkeeping consistent with what's actually still in the
+  # bucket, and lets the compactor clean up its own index entries on the same
+  # schedule instead of accumulating stale references forever.
+  limits_config:
+    retention_period: 336h
+
+  compactor:
+    retention_enabled: true
+    # Required as soon as retention_enabled is true - this is where Loki tracks
+    # pending delete requests from the retention/compaction process itself, kept
+    # separate from where the log chunks themselves live even though it's the
+    # same S3 bucket in this case.
+    delete_request_store: s3
+
+# A single-binary deployment doesn't need Loki's own object-storage cache tier,
+# gateway, or the various per-component autoscalers that the scalable/microservices
+# modes ship with - all left at their chart defaults (disabled) rather than turned
+# on and then never used.
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# The chart's own default values still set nonzero replicas for the "simple
+# scalable" components (read/write/backend) even when deploymentMode is
+# SingleBinary - these three have to be zeroed out explicitly, or the chart's
+# own validation step refuses to install at all, since having both modes
+# "configured" at once (nonzero replicas on both sides) usually means a mistake
+# rather than an intentional setup.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# The chart also bundles its own MinIO instance for local/dev testing storage.
+# Not needed here since real S3 is already doing that job.
+minio:
+  enabled: false
+
+gateway:
+  enabled: false
+
+# Both enabled by default in the chart, unlike MinIO and the gateway above -
+# each backed by its own memcached Deployment sized for a real production
+# workload (chunksCache alone defaults to requesting close to 10GB of memory).
+# That doesn't fit on a t3.large already running k3s, Prometheus, Grafana, and
+# the app itself, and neither cache is worth the memory for a portfolio
+# project's traffic volume in the first place.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
