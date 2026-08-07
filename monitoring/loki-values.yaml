@@ -58,6 +58,11 @@ loki:
 
   compactor:
     retention_enabled: true
+    # Required as soon as retention_enabled is true - this is where Loki tracks
+    # pending delete requests from the retention/compaction process itself, kept
+    # separate from where the log chunks themselves live even though it's the
+    # same S3 bucket in this case.
+    delete_request_store: s3
 
 # A single-binary deployment doesn't need Loki's own object-storage cache tier,
 # gateway, or the various per-component autoscalers that the scalable/microservices
@@ -92,4 +97,15 @@ minio:
   enabled: false
 
 gateway:
+  enabled: false
+
+# Both enabled by default in the chart, unlike MinIO and the gateway above -
+# each backed by its own memcached Deployment sized for a real production
+# workload (chunksCache alone defaults to requesting close to 10GB of memory).
+# That doesn't fit on a t3.large already running k3s, Prometheus, Grafana, and
+# the app itself, and neither cache is worth the memory for a portfolio
+# project's traffic volume in the first place.
+chunksCache:
+  enabled: false
+resultsCache:
   enabled: false
