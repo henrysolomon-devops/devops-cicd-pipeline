@@ -53,13 +53,19 @@ service:
   port: 5000
   targetPort: 5000
 
-resources: {}
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+# Added in v8, alongside the rest of the monitoring stack: without
+# explicit limits, a single greedy Pod (Prometheus is the usual
+# suspect) can starve everything else running on the same node, which
+# is exactly the class of problem that forced a bigger instance size in
+# v6. These numbers are intentionally modest - this app barely does
+# any real work - and can be tuned later if a real bottleneck shows up.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
 
 # Liveness/readiness probes, matching k8s/deployment.yaml from v2:
 # both check GET /health on the container's port 5000.
@@ -82,3 +88,34 @@ volumeMounts: []
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Added in v8: a small, single-replica Redis used purely as a short-lived
+# cache in front of the Open-Meteo weather lookup. No PersistentVolume,
+# on purpose - see templates/redis-deployment.yaml for the full reasoning.
+redis:
+  image:
+    repository: redis
+    tag: "7.4-alpine"
+  port: 6379
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 96Mi
+
+# Added in v8: registers this app's /metrics endpoint with Prometheus.
+# Disabling this per-environment is possible if ever needed, but there's
+# no reason to in practice - every namespace should be scraped the same way.
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  path: /metrics
+
+# Added in v8: controls whether this Release also installs the shared
+# Grafana dashboard ConfigMap. Left off by default here and switched on
+# only in values-dev.yaml, since the dashboard only needs to exist once,
+# not once per namespace - see templates/grafana-dashboard-configmap.yaml.
+grafanaDashboard:
+  enabled: false

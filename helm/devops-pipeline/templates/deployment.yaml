@@ -57,6 +57,14 @@ spec:
           env:
             - name: APP_ENV
               value: "{{ .Values.appEnv }}"
+            # Added in v8: points the app at this namespace's own Redis
+            # Service, so the weather cache stays isolated per
+            # environment, the same way dev/staging/production have
+            # always been isolated from each other.
+            - name: REDIS_HOST
+              value: "{{ include "devops-pipeline.fullname" . }}-redis"
+            - name: REDIS_PORT
+              value: "{{ .Values.redis.port }}"
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}

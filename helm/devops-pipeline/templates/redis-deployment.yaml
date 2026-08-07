@@ -1,0 +1,45 @@
+# Lightweight Redis cache for the weather lookup, added in v8. This is
+# deliberately a plain Deployment, not a StatefulSet, and has no
+# PersistentVolume attached - if this Pod restarts, the cache is simply
+# empty until the next request repopulates it. That's fine here, since
+# nothing this app caches is worth persisting across a restart, and it
+# keeps this version focused on observability rather than introducing a
+# second new concept (persistent storage) alongside it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "devops-pipeline.fullname" . }}-redis
+  labels:
+    {{- include "devops-pipeline.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  # Always exactly one replica - this is a cache, not a source of truth,
+  # so there's nothing to gain from running more than one copy, and
+  # every extra replica would just mean a separately cold cache anyway.
+  replicas: 1
+  selector:
+    matchLabels:
+      # Uses its own app.kubernetes.io/name (with a "-redis" suffix)
+      # rather than the shared devops-pipeline.selectorLabels helper, so
+      # this Deployment's Pods are never accidentally matched by the
+      # main app's Service selector, or vice versa.
+      app.kubernetes.io/name: {{ include "devops-pipeline.name" . }}-redis
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "devops-pipeline.name" . }}-redis
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: redis
+    spec:
+      containers:
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          ports:
+            - name: redis
+              containerPort: {{ .Values.redis.port }}
+              protocol: TCP
+          {{- with .Values.redis.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

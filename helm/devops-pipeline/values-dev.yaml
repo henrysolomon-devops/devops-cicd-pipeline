@@ -23,3 +23,10 @@ image:
 # No service.port override needed here - the base values.yaml default
 # (5000) already is dev's port. staging and production each override
 # it below since they need their own distinct port on the same server.
+
+# Added in v8: this Release is the one that carries the shared Grafana
+# dashboard ConfigMap, since it only needs to be registered with
+# Grafana once, not once per namespace. dev was picked because it's
+# the one environment that's always kept in sync automatically.
+grafanaDashboard:
+  enabled: true
