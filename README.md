@@ -16,7 +16,8 @@ The goal isn't just to run the commands, but to understand why each tool is used
 | v5.1 | GitHub Actions deploy to the v5 EC2/k3s server | Extending existing CI/CD to a real cloud target | ✅ Done |
 | v6.0 | ArgoCD | GitOps-based Continuous Deployment | ✅ Done |
 | v7.0 | Jenkins pipeline (alternative to Actions) | Alternative CI tooling | ✅ Done |
-| v8.0 | Prometheus + Grafana | Observability & monitoring | 🔜 Next |
+| v8.0 | Prometheus + Grafana | Observability & monitoring | ✅ Done |
+| v8.1 | Loki + Grafana Alloy + Alertmanager | Log aggregation & alerting | 🔜 Next |
 | v9.0 | Load Balancer + AWS CloudFormation | Networking, alternative IaC | ⏳ Planned |
 
 ## Project structure
@@ -24,15 +25,15 @@ The goal isn't just to run the commands, but to understand why each tool is used
 Each tool gets its own folder at the repo root, added as the version that introduces it gets built. The layout below shows the full planned structure; folders marked with a later version number don't exist yet.
 
     devops-cicd-pipeline/
-    ├── app/         # Application source code (v1)
+    ├── app/         # Application source code (v1, Redis + Open-Meteo + /metrics added in v8)
     ├── docker/      # Dockerfile + .dockerignore (v1)
-    ├── helm/        # Helm chart (v3, replaces the old k8s/ manifests from v2)
+    ├── helm/        # Helm chart (v3, Redis/ServiceMonitor/dashboard templates added in v8)
     ├── .github/     # GitHub Actions workflows (v4, extended in v5.1)
     ├── terraform/   # Infrastructure as Code (v5, remote state added in v5.1)
     ├── ansible/     # Configuration management (v5)
-    ├── argocd/      # GitOps application definitions (v6)
-    ├── jenkins/     # Jenkins pipeline (v7)
-    ├── monitoring/  # Prometheus + Grafana configs (v8, not yet added)
+    ├── argocd/      # GitOps application definitions (v6, recovered in v8 after v7's detour)
+    ├── monitoring/  # Prometheus + Grafana config (v8)
+    ├── loki/        # Log aggregation config (v8.1, not yet added)
     └── docs/        # Detailed per-version guides (setup, testing, reasoning)
 
 ## v1: Flask app + Docker + HTML dashboard
@@ -79,9 +80,15 @@ Deployment moved from GitHub Actions pushing directly into the cluster, to ArgoC
 
 ## v7: Jenkins (alternative CI/CD pipeline)
 
-A second EC2 instance, `jenkins-server`, runs a fully self-hosted Jenkins controller, configured entirely from code via JCasC - no manual setup wizard, no clicking through "Manage Jenkins" by hand. Deployment moves back to a push model: Jenkins builds and pushes the image, then deploys directly to dev, staging, and production with its own native approval gates, replacing `deploy.yml` and `promote.yml` entirely. GitHub Actions' role narrows to just `infra.yml` - provisioning and tearing down the AWS infrastructure itself. ArgoCD and the pull-based model from v6 remain fully intact on the `v6.0.0` tag.
+A second EC2 instance, `jenkins-server`, ran a fully self-hosted Jenkins controller, configured entirely from code via JCasC - no manual setup wizard, no clicking through "Manage Jenkins" by hand. Deployment moved back to a push model: Jenkins built and pushed the image, then deployed directly to dev, staging, and production with its own native approval gates. This was a deliberate, self-contained detour to demonstrate an alternative CI tool; v8 reverted to v6's GitOps architecture as the base going forward. Jenkins and its server remain fully intact on the `v7.0.0` tag.
 
 📄 [Full guide: setup, testing, and reasoning](./docs/v7-jenkins.md)
+
+## v8: Prometheus + Grafana (Observability & Monitoring)
+
+Real observability, for the first time: `kube-prometheus-stack` (Prometheus, Grafana, node-exporter, kube-state-metrics) is installed automatically as part of `infra.yml`, right alongside the ArgoCD setup restored from v6. The app now exposes custom metrics at `/metrics` - request rate and latency for every route, plus call duration, error rate, and cache hit/miss counters for a new Los Angeles weather feature (a real Open-Meteo API call, cached briefly in a lightweight per-namespace Redis with no persistent storage). A custom Grafana dashboard, defined as a JSON file in the repo rather than clicked together by hand, covers all of it with an environment switcher for dev/staging/production. Grafana itself runs with no login screen, since access is already restricted at the network level to a single IP.
+
+📄 [Full guide: setup, testing, and reasoning](./docs/v8-observability.md)
 
 ## License
 

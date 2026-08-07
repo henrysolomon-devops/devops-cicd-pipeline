@@ -23,6 +23,7 @@ system. The purpose is twofold:
 | v6.0 | ArgoCD | GitOps-based Continuous Deployment |
 | v7.0 | Jenkins pipeline (alternative to Actions) | Alternative CI tooling |
 | v8.0 | Prometheus + Grafana | Observability & monitoring |
+| v8.1 | Loki + Grafana Alloy + Alertmanager | Log aggregation & alerting |
 | v9.0 | Load Balancer + AWS CloudFormation | Networking, alternative IaC |
 
 ## Environment Strategy (from v2 onward)
