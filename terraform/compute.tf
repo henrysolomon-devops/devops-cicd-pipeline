@@ -36,6 +36,19 @@ resource "aws_instance" "server" {
   vpc_security_group_ids = [aws_security_group.server.id]
   key_name               = aws_key_pair.devops_pipeline.key_name
 
+  # Added in v8. The AMI's default root volume (under 8GB) was never a
+  # problem before, but pulling every image for k3s, ArgoCD, and the
+  # full kube-prometheus-stack (Prometheus, Grafana, node-exporter,
+  # kube-state-metrics, plus the operator itself) at the same time fills
+  # it completely - confirmed directly on the server: kubectl reported
+  # DiskPressure and started evicting Pods, not a memory problem. 30GB
+  # leaves comfortable headroom without being wasteful for a box that's
+  # only ever up while actively testing.
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+  }
+
   tags = {
     Name = "devops-pipeline-server"
   }
