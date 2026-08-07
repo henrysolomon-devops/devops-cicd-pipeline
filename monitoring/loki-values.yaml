@@ -15,6 +15,22 @@ loki:
   commonConfig:
     replication_factor: 1
 
+  # Required for any real (non-test) storage backend - this is what tells Loki
+  # how to actually build its index: which store to use, which object storage
+  # backend, and the schema version. TSDB + v13 is the current recommended
+  # combination for a fresh install. The "from" date only needs to be in the
+  # past relative to when this first gets applied - it marks the point this
+  # schema takes effect, not a real historical cutoff.
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
   # Points Loki at the S3 bucket created by hand outside Terraform (see iam.tf
   # for why it isn't managed here) instead of the default local filesystem, which
   # would be wiped out on every terraform destroy along with the EC2 instance
