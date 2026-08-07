@@ -1,0 +1,79 @@
+# Helm values for prometheus-community/kube-prometheus-stack, installed
+# by infra.yml into the "monitoring" namespace. This is the single
+# source of truth for how Prometheus and Grafana are configured - none
+# of this is ever clicked together by hand, so it survives every
+# terraform destroy/apply cycle exactly the same way every time.
+
+prometheus:
+  prometheusSpec:
+    # By default this chart only lets Prometheus discover ServiceMonitors
+    # that carry its own Helm release label, and only within its own
+    # namespace. Our app's ServiceMonitor (from the devops-pipeline
+    # chart) lives in dev/staging/production and was never given that
+    # label, so both of these have to be relaxed, or Prometheus simply
+    # never finds it.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+
+    # How long Prometheus keeps scraped data before dropping it. Since
+    # the server itself is never left running between tests (see the
+    # project's cost/safety rules), this number barely matters in
+    # practice - everything gets wiped on the next destroy anyway - so
+    # the chart's own sensible default is kept rather than tuned.
+    retention: 10d
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+# Alertmanager is intentionally left disabled here. Alerting is planned
+# for v8.1, alongside a log-aggregation tool, once there's actually
+# something useful to correlate an alert against - see docs/v8-observability.md.
+alertmanager:
+  enabled: false
+
+grafana:
+  service:
+    type: LoadBalancer
+    # A new port, separate from every app port (5000-5002) and the k3s
+    # API (6443). Needs its own permanent rule in terraform/security.tf,
+    # scoped to MY_IP only, the same way SSH and the k3s API already are.
+    port: 3000
+
+  sidecar:
+    dashboards:
+      enabled: true
+      # Same reasoning as the ServiceMonitor setting above: our app's
+      # dashboard ConfigMap lives in the "dev" namespace (see
+      # values-dev.yaml in the app chart), not in "monitoring" where
+      # Grafana itself runs, so the sidecar has to be told to look
+      # everywhere rather than just its own namespace.
+      searchNamespace: ALL
+      # This is the label the sidecar watches for - matches the
+      # grafana_dashboard: "1" label set in the app chart's
+      # grafana-dashboard-configmap.yaml template.
+      label: grafana_dashboard
+
+  # No login screen. This mirrors the exact reasoning used for Jenkins
+  # in v7 (securityRealm: None there): access to this port is already
+  # restricted at the network level, to MY_IP only, via security.tf, so
+  # a login prompt on top of that would just be friction with no real
+  # security benefit.
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Admin
+    auth:
+      disable_login_form: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
