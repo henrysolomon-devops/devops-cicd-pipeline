@@ -1,0 +1,24 @@
+# Wraps dashboards/app-metrics.json in a ConfigMap carrying the
+# grafana_dashboard label. kube-prometheus-stack's Grafana comes with a
+# sidecar container that watches for ConfigMaps with this exact label
+# and loads them into Grafana automatically - so this dashboard survives
+# every terraform destroy/apply cycle without ever being clicked
+# together by hand in the Grafana UI.
+#
+# Only enabled for one environment (see values-dev.yaml) since this is
+# a single shared dashboard, not something that needs to exist three
+# times over. The dashboard's own $environment dropdown is what lets you
+# switch between dev/staging/production data, regardless of which
+# namespace this ConfigMap physically lives in.
+{{- if .Values.grafanaDashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "devops-pipeline.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "devops-pipeline.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  app-metrics.json: |
+{{ .Files.Get "dashboards/app-metrics.json" | indent 4 }}
+{{- end }}

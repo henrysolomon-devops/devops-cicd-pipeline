@@ -84,6 +84,18 @@
             <span class="label">Health check (/health)</span>
             <span class="status-value"><span class="dot"></span>{{ health_status }}</span>
         </div>
+        <hr>
+        <!-- Added in v8: pulled from Open-Meteo, cached briefly in Redis.
+             Rendered conditionally since the app is designed to keep working
+             even if Open-Meteo (or Redis) happens to be unreachable. -->
+        <div class="row">
+            <span class="label">Los Angeles weather</span>
+            {% if weather.condition == "unavailable" %}
+            <span class="value">unavailable</span>
+            {% else %}
+            <span class="value">{{ weather.temperature_c }}&deg;C, {{ weather.condition }}</span>
+            {% endif %}
+        </div>
         <div class="badge">RUNNING</div>
     </div>
 </body>

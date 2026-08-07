@@ -1,0 +1,30 @@
+# Tells the Prometheus installed by infra.yml (kube-prometheus-stack)
+# to scrape this app's /metrics endpoint. Without this, Prometheus only
+# ever sees Kubernetes/node-level metrics - it has no idea this Service
+# even exists, let alone that it exposes anything worth reading.
+#
+# This is a Custom Resource, not a built-in Kubernetes object, so it
+# only works once kube-prometheus-stack's CRDs are installed on the
+# cluster (which infra.yml handles before this chart is ever deployed).
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "devops-pipeline.fullname" . }}
+  labels:
+    {{- include "devops-pipeline.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "devops-pipeline.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    # "http" refers to the named port on the app's Service (service.yaml),
+    # the same one the Service itself already exposes - not a raw port
+    # number, so this keeps working even if the port ever changes.
+    - port: http
+      path: {{ .Values.serviceMonitor.path }}
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

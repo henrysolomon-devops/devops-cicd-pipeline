@@ -1,0 +1,21 @@
+# ClusterIP Service in front of the Redis Deployment. Deliberately never
+# LoadBalancer, unlike the app's own Service - Redis has no reason to be
+# reachable from outside the cluster, so it never needs a security group
+# rule or a public port of its own.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devops-pipeline.fullname" . }}-redis
+  labels:
+    {{- include "devops-pipeline.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.redis.port }}
+      targetPort: redis
+      protocol: TCP
+      name: redis
+  selector:
+    app.kubernetes.io/name: {{ include "devops-pipeline.name" . }}-redis
+    app.kubernetes.io/instance: {{ .Release.Name }}
