@@ -101,6 +101,11 @@ grafana:
       access: proxy
       url: http://loki.monitoring.svc.cluster.local:3100
       isDefault: false
+      # A fixed uid, rather than letting Grafana generate a random one on every
+      # fresh install - the new log panel on the app dashboard (added in v8.1)
+      # references this exact uid directly, and a random one would silently
+      # break that reference on every terraform destroy/apply cycle.
+      uid: loki
 
   # No login screen. This mirrors the exact reasoning used for Jenkins
   # in v7 (securityRealm: None there): access to this port is already
