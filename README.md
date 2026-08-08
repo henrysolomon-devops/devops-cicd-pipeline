@@ -1,6 +1,6 @@
 # DevOps CI/CD Pipeline
 
-A complete, end-to-end DevOps CI/CD pipeline built incrementally, one tool at a time. Each version adds exactly one new concept to an already-working system, starting from containerizing a simple app and working up to Kubernetes, Infrastructure as Code, GitOps, CI/CD, and observability.
+A complete, end-to-end DevOps CI/CD pipeline built incrementally, one tool at a time. Each version adds exactly one new concept to an already-working system, starting from containerizing a simple app and working up to Kubernetes, Infrastructure as Code, GitOps, CI/CD, observability, and networking.
 
 The goal isn't just to run the commands, but to understand why each tool is used. See [`PROJECT_PLAN.md`](./PROJECT_PLAN.md) for the full roadmap, conventions, and reasoning behind every decision. Each version below also has its own detailed guide under [`docs/`](./docs), covering setup, testing, and the reasoning behind that version specifically.
 
@@ -18,22 +18,23 @@ The goal isn't just to run the commands, but to understand why each tool is used
 | v7.0 | Jenkins pipeline (alternative to Actions) | Alternative CI tooling | ✅ Done |
 | v8.0 | Prometheus + Grafana | Observability & monitoring | ✅ Done |
 | v8.1 | Loki + Grafana Alloy + Alertmanager | Log aggregation & alerting | ✅ Done |
-| v9.0 | Load Balancer + AWS CloudFormation | Networking, alternative IaC | ⏳ Planned |
+| v9.0 | Load Balancer + AWS CloudFormation | Networking, alternative IaC | ✅ Done |
+| v10.0 | Migrate to Amazon EKS | Managed Kubernetes, IRSA, AWS Load Balancer Controller | ⏳ Planned |
 
 ## Project structure
 
 Each tool gets its own folder at the repo root, added as the version that introduces it gets built. The layout below shows the full planned structure; folders marked with a later version number don't exist yet.
 
     devops-cicd-pipeline/
-    ├── app/         # Application source code (v1, Redis + Open-Meteo + /metrics added in v8)
-    ├── docker/      # Dockerfile + .dockerignore (v1)
-    ├── helm/        # Helm chart (v3, Redis/ServiceMonitor/dashboard templates added in v8, app-level alerting rules added in v8.1)
-    ├── .github/     # GitHub Actions workflows (v4, extended in v5.1)
-    ├── terraform/   # Infrastructure as Code (v5, remote state added in v5.1, Loki IAM access added in v8.1)
-    ├── ansible/     # Configuration management (v5)
-    ├── argocd/      # GitOps application definitions (v6, recovered in v8 after v7's detour)
-    ├── monitoring/  # Prometheus + Grafana config (v8, Loki/Alloy/Alertmanager config added in v8.1)
-    └── docs/        # Detailed per-version guides (setup, testing, reasoning)
+    ├── app/            # Application source code (v1, Redis + Open-Meteo + /metrics added in v8, APP_URL_PREFIX added in v9)
+    ├── docker/         # Dockerfile + .dockerignore (v1)
+    ├── helm/           # Helm chart (v3, Redis/ServiceMonitor/dashboard templates added in v8, app-level alerting rules added in v8.1, NodePort + appUrlPrefix added in v9)
+    ├── .github/        # GitHub Actions workflows (v4, extended in v5.1, rewritten around CloudFormation in v9)
+    ├── cloudformation/ # Infrastructure as Code (v9, replaces terraform/ - recoverable from the v8.1.0 tag)
+    ├── ansible/        # Configuration management (v5)
+    ├── argocd/         # GitOps application definitions (v6, recovered in v8 after v7's detour)
+    ├── monitoring/     # Prometheus + Grafana config (v8, Loki/Alloy/Alertmanager config added in v8.1, Grafana NodePort added in v9)
+    └── docs/           # Detailed per-version guides (setup, testing, reasoning)
 
 ## v1: Flask app + Docker + HTML dashboard
 
@@ -94,6 +95,12 @@ Real observability, for the first time: `kube-prometheus-stack` (Prometheus, Gra
 Adds log aggregation and alerting on top of v8's metrics-only observability stack. Grafana Alloy (the current standard, replacing the now end-of-life Promtail) collects logs from every Pod across every namespace and ships them to Loki, which stores them in a dedicated S3 bucket so log history survives a `terraform destroy`/`apply` cycle the same way Terraform's own state already does - accessed via an IAM Instance Profile on the EC2 instance, since k3s has no IRSA. Alertmanager, bundled with `kube-prometheus-stack` since v8 but left disabled until now, routes alerts to two separate Slack channels (`#alerts-infra` and `#alerts-app`) based on a `team` label carried by every alerting rule. A new "Live Logs" panel on the existing app dashboard uses the same environment switcher already in place for metrics.
 
 📄 [Full guide: setup, testing, and reasoning](./docs/v8.1-observability-logging.md)
+
+## v9: Load Balancer + AWS CloudFormation
+
+Terraform is replaced entirely by three CloudFormation stacks (network, compute, load balancer), connected through cross-stack `Fn::ImportValue` references rather than Terraform's module system - a direct comparison between a multi-cloud IaC tool and AWS's own native one. An Application Load Balancer now sits in front of all three environments, routing by URL path (`/dev`, `/staging`, `/production`) instead of by port, which meant moving each environment's Service from `LoadBalancer` to `NodePort` with an explicitly pinned port so the ALB's Target Groups always know exactly where to reach it. The app itself gained an `APP_URL_PREFIX`, while `/health` and `/metrics` deliberately stayed unprefixed, since Kubernetes' probes and Prometheus' scraper both reach those directly, never through the ALB. The app port is no longer reachable from outside at all - the ALB is now the only way in.
+
+📄 [Full guide: setup, testing, and reasoning](./docs/v9-cloudformation-loadbalancer.md)
 
 ## License
 
