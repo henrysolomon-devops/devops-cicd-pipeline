@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template, Response, request, g
+from flask import Flask, Blueprint, jsonify, render_template, Response, request, g
 import os
 import socket
 import json
@@ -21,6 +21,16 @@ APP_VERSION = os.environ.get("APP_VERSION", "v1.0.0")
 # answered the request (useful once GitHub Actions starts deploying to
 # all three namespaces automatically, from v4 onward).
 APP_ENV = os.environ.get("APP_ENV", "unknown")
+
+# Added in v9. Now that all three environments sit behind a single ALB
+# doing path-based routing (/dev, /staging, /production) instead of each
+# getting its own port, the app itself has to know which prefix it's
+# being reached under - otherwise every link and asset on the page would
+# point at the bare root, which the ALB no longer forwards anywhere.
+# Left blank by default so running this locally with `python app.py`
+# (or the original v1 Docker-only setup) still works exactly as before,
+# with no prefix at all.
+APP_URL_PREFIX = os.environ.get("APP_URL_PREFIX", "").rstrip("/")
 
 # Redis connection details for the weather cache, added in v8. Each
 # namespace gets its own lightweight Redis Deployment (no persistent
@@ -197,13 +207,29 @@ def get_weather():
     return weather
 
 
-@app.route("/")
+# Added in v9. Everything a real user actually browses to - the
+# dashboard and the JSON status endpoint - lives on this Blueprint, which
+# gets registered under APP_URL_PREFIX further down. /health and /metrics
+# are deliberately kept off this Blueprint and registered directly on the
+# app instead, at the plain root path with no prefix at all. Both of
+# those are internal, infrastructure-facing endpoints rather than
+# something a person browses to through the ALB - Kubernetes' own
+# liveness/readiness probes hit /health directly against the Pod, and
+# Prometheus' ServiceMonitor scrapes /metrics the same way, neither of
+# them going anywhere near the load balancer or its path routing. Moving
+# either one behind a prefix would mean updating those two consumers to
+# match, for no actual benefit.
+site = Blueprint("site", __name__)
+
+
+@site.route("/")
 def dashboard():
     weather = get_weather()
     return render_template(
         "dashboard.html",
         version=APP_VERSION,
         environment=APP_ENV,
+        url_prefix=APP_URL_PREFIX,
         hostname=socket.gethostname(),
         timestamp=datetime.now(timezone.utc).isoformat(),
         health_status="healthy",
@@ -211,7 +237,7 @@ def dashboard():
     )
 
 
-@app.route("/api/status")
+@site.route("/api/status")
 def api_status():
     weather = get_weather()
     return jsonify({
@@ -224,12 +250,21 @@ def api_status():
     })
 
 
+# Registered with a prefix only when one is actually set - locally, or
+# in the original v1 Docker-only setup, APP_URL_PREFIX is blank and this
+# just behaves like a normal, unprefixed Flask app.
+app.register_blueprint(site, url_prefix=APP_URL_PREFIX or None)
+
+
 @app.route("/health")
 def health():
-    # Used by Kubernetes liveness/readiness probes (from v2 onward).
-    # Deliberately left independent of Redis and Open-Meteo, since a slow
-    # or unavailable third party has nothing to do with whether this Pod
-    # itself is healthy.
+    # Used by Kubernetes liveness/readiness probes (from v2 onward) and,
+    # from v9 onward, by the ALB's own Target Group health checks too -
+    # both hit this exact same unprefixed path directly against the Pod
+    # or the instance's NodePort, bypassing the ALB's path routing rules
+    # entirely. Deliberately left independent of Redis and Open-Meteo,
+    # since a slow or unavailable third party has nothing to do with
+    # whether this Pod itself is healthy.
     return jsonify({"status": "healthy"}), 200
 
 

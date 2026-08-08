@@ -2,7 +2,7 @@
 # by infra.yml into the "monitoring" namespace. This is the single
 # source of truth for how Prometheus and Grafana are configured - none
 # of this is ever clicked together by hand, so it survives every
-# terraform destroy/apply cycle exactly the same way every time.
+# infra destroy/apply cycle exactly the same way every time.
 
 prometheus:
   prometheusSpec:
@@ -69,11 +69,24 @@ alertmanager:
 
 grafana:
   service:
-    type: LoadBalancer
-    # A new port, separate from every app port (5000-5002) and the k3s
-    # API (6443). Needs its own permanent rule in terraform/security.tf,
-    # scoped to MY_IP only, the same way SSH and the k3s API already are.
+    # Changed in v9 from LoadBalancer to NodePort. The chart's own
+    # Service template only renders an explicit nodePort when type is
+    # exactly "NodePort" - under LoadBalancer, the nodePort value below
+    # was being silently ignored and Kubernetes assigned a random one
+    # instead, which is what caused the collision with the app's own
+    # ports in the first place. Access moves from
+    # http://<server-ip>:3000 to http://<server-ip>:5010 as a result -
+    # a different port, not a fundamentally different way of reaching
+    # it, since kube-proxy serves NodePort traffic on every Node
+    # directly, without needing Klipper the way LoadBalancer did.
+    type: NodePort
     port: 3000
+    # Pinned explicitly rather than left to Kubernetes to assign at
+    # random - this now actually takes effect, unlike under
+    # LoadBalancer above. Needs its own permanent rule in
+    # cloudformation/compute-stack.yaml, scoped to MyIp only, the same
+    # way SSH and the k3s API already are.
+    nodePort: 5010
 
   sidecar:
     dashboards:
@@ -109,9 +122,9 @@ grafana:
 
   # No login screen. This mirrors the exact reasoning used for Jenkins
   # in v7 (securityRealm: None there): access to this port is already
-  # restricted at the network level, to MY_IP only, via security.tf, so
-  # a login prompt on top of that would just be friction with no real
-  # security benefit.
+  # restricted at the network level, to MyIp only, via
+  # cloudformation/compute-stack.yaml, so a login prompt on top of that
+  # would just be friction with no real security benefit.
   grafana.ini:
     auth.anonymous:
       enabled: true

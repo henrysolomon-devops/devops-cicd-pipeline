@@ -57,6 +57,11 @@ spec:
           env:
             - name: APP_ENV
               value: "{{ .Values.appEnv }}"
+            # Added in v9: tells the app which path prefix it's being
+            # reached under now that the ALB routes by URL path instead
+            # of by port. See app/app.py for how this gets used.
+            - name: APP_URL_PREFIX
+              value: "{{ .Values.appUrlPrefix }}"
             # Added in v8: points the app at this namespace's own Redis
             # Service, so the weather cache stays isolated per
             # environment, the same way dev/staging/production have

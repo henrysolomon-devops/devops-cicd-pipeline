@@ -1,9 +1,15 @@
-name: Infrastructure (Terraform + Ansible)
+name: Infrastructure (CloudFormation + Ansible)
 
 # This one's manual on purpose - it touches real AWS money, so it
 # should never fire on its own just because someone pushed to main.
 # I run it by hand, pick apply or destroy, and approve it myself
 # through the aws-infra environment before anything actually happens.
+#
+# Rewritten in v9 to use CloudFormation instead of Terraform - see
+# cloudformation/ for the three stacks this now deploys, in place of
+# what used to live in terraform/. Everything below Ansible (namespaces,
+# monitoring, ArgoCD) is untouched, since none of that ever cared which
+# tool provisioned the server underneath it.
 on:
   workflow_dispatch:
     inputs:
@@ -31,23 +37,37 @@ jobs:
   infra:
     runs-on: ubuntu-latest
     environment: aws-infra
-    defaults:
-      run:
-        working-directory: terraform
 
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.15.8"
+      # TEMPORARY - added only to diagnose the AssumeRoleWithWebIdentity
+      # failure. Prints the actual sub/aud claims GitHub is sending, so
+      # they can be compared directly against the trust policy instead
+      # of guessing. Remove this step once the role is confirmed working.
+      - name: DEBUG - show the real OIDC token claims
+        run: |
+          IDTOKEN=$(curl -sSL -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          python3 -c "
+          import base64, json, sys
+          token = sys.argv[1]
+          payload = token.split('.')[1]
+          padded = payload + '=' * (-len(payload) % 4)
+          print(json.dumps(json.loads(base64.urlsafe_b64decode(padded)), indent=2))
+          " "$IDTOKEN"
 
+      # This role is new in v9 and deliberately separate from the old
+      # github-actions-terraform-role - that one is left completely
+      # alone so any earlier tag (v5.1 through v8.1) can still be
+      # checked out and applied on its own, without this workflow's
+      # changes affecting it. See the account setup notes for exactly
+      # what this role needs.
       - name: Get temporary AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::578254188866:role/github-actions-terraform-role
+          role-to-assume: arn:aws:iam::578254188866:role/github-actions-cloudformation-role
           aws-region: us-east-1
 
       - name: Install Ansible
@@ -66,24 +86,73 @@ jobs:
           ./get_helm.sh
           rm get_helm.sh
 
-      - name: Write out the SSH public key so Terraform can import it
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ vars.SSH_PUBLIC_KEY }}" > ~/.ssh/devops-pipeline-key.pub
-
-      - name: Terraform init
-        run: terraform init
-
       # ---------- apply path ----------
 
-      - name: Terraform apply
+      # First of three stacks. No CAPABILITY_NAMED_IAM needed here -
+      # this one only creates a VPC, subnets, and routing, nothing that
+      # touches IAM.
+      - name: Deploy the network stack
         if: inputs.action == 'apply'
-        run: terraform apply -auto-approve -var="my_ip=${{ vars.MY_IP }}"
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation/network-stack.yaml \
+            --stack-name devops-pipeline-network
+
+      # Second stack. CAPABILITY_NAMED_IAM is required here specifically
+      # because this template creates an IAM Role and Instance Profile
+      # (for Loki's S3 access) with names it chooses itself, rather than
+      # letting CloudFormation generate them - acknowledging that is
+      # what the capability flag is actually for.
+      - name: Deploy the compute stack
+        if: inputs.action == 'apply'
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation/compute-stack.yaml \
+            --stack-name devops-pipeline-compute \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              MyIp="${{ vars.MY_IP }}"
+
+      # Third and last stack. No IAM resources here either, so no
+      # capability flag needed - just the ALB, its security group, the
+      # target groups, and the listener rules.
+      - name: Deploy the load balancer stack
+        if: inputs.action == 'apply'
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation/loadbalancer-stack.yaml \
+            --stack-name devops-pipeline-loadbalancer
+
+      # Added in v9, replacing the GitHub repo Variables that used to
+      # hold this in the Terraform version - now that everything is
+      # already living inside AWS, it makes more sense for these
+      # operational values to live there too, in SSM Parameter Store,
+      # rather than round-tripping through a GitHub API call.
+      - name: Write server IP and ALB DNS name to SSM Parameter Store
+        if: inputs.action == 'apply'
+        run: |
+          SERVER_IP=$(aws cloudformation describe-stacks \
+            --stack-name devops-pipeline-compute \
+            --query "Stacks[0].Outputs[?OutputKey=='ServerPublicIp'].OutputValue" \
+            --output text)
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --stack-name devops-pipeline-loadbalancer \
+            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDnsName'].OutputValue" \
+            --output text)
+          aws ssm put-parameter --name "/devops-pipeline/server-public-ip" \
+            --value "$SERVER_IP" --type String --overwrite
+          aws ssm put-parameter --name "/devops-pipeline/alb-dns-name" \
+            --value "$ALB_DNS" --type String --overwrite
 
       - name: Look up the security group this run needs to touch
         if: inputs.action == 'apply'
         id: app_sg
-        run: echo "id=$(terraform output -raw security_group_id)" >> "$GITHUB_OUTPUT"
+        run: |
+          SG_ID=$(aws cloudformation describe-stacks \
+            --stack-name devops-pipeline-compute \
+            --query "Stacks[0].Outputs[?OutputKey=='AppServerSecurityGroupId'].OutputValue" \
+            --output text)
+          echo "id=$SG_ID" >> "$GITHUB_OUTPUT"
 
       - name: Figure out this runner's own public IP
         if: inputs.action == 'apply'
@@ -113,6 +182,9 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/devops-pipeline-key
           chmod 600 ~/.ssh/devops-pipeline-key
 
+      # Reads the server IP from SSM itself now (see deploy-k3s.sh),
+      # rather than being handed it directly - nothing about how this
+      # step is called had to change.
       - name: Run the Ansible playbook to install k3s
         if: inputs.action == 'apply'
         working-directory: ansible
@@ -145,7 +217,6 @@ jobs:
       # committed, or uploaded as an artifact.
       - name: Render the Alertmanager Slack webhook config
         if: inputs.action == 'apply'
-        working-directory: ${{ github.workspace }}
         run: |
           sed \
             -e "s|__SLACK_WEBHOOK_INFRA__|${{ secrets.SLACK_WEBHOOK_INFRA }}|" \
@@ -154,7 +225,6 @@ jobs:
 
       - name: Install kube-prometheus-stack (Prometheus + Grafana + Alertmanager)
         if: inputs.action == 'apply'
-        working-directory: ${{ github.workspace }}
         run: |
           export KUBECONFIG=~/.kube/devops-pipeline-config
           helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
@@ -170,7 +240,6 @@ jobs:
       # in v8.
       - name: Apply the infra-level alerting rules
         if: inputs.action == 'apply'
-        working-directory: ${{ github.workspace }}
         run: |
           export KUBECONFIG=~/.kube/devops-pipeline-config
           kubectl apply -f monitoring/prometheusrule-infra.yaml
@@ -186,7 +255,6 @@ jobs:
 
       - name: Install Loki
         if: inputs.action == 'apply'
-        working-directory: ${{ github.workspace }}
         run: |
           export KUBECONFIG=~/.kube/devops-pipeline-config
           helm upgrade --install loki grafana/loki \
@@ -197,7 +265,6 @@ jobs:
 
       - name: Install Grafana Alloy
         if: inputs.action == 'apply'
-        working-directory: ${{ github.workspace }}
         run: |
           export KUBECONFIG=~/.kube/devops-pipeline-config
           helm upgrade --install alloy grafana/alloy \
@@ -240,23 +307,21 @@ jobs:
       # every time, not just once by hand.
       - name: Register the three environment Applications with ArgoCD
         if: inputs.action == 'apply'
-        # This job defaults to running inside terraform/, but the argocd/
-        # folder lives at the repo root - without this override, kubectl
-        # would look for terraform/argocd/dev-application.yaml instead.
-        working-directory: ${{ github.workspace }}
         run: |
           export KUBECONFIG=~/.kube/devops-pipeline-config
           kubectl apply -f argocd/dev-application.yaml
           kubectl apply -f argocd/staging-application.yaml
           kubectl apply -f argocd/production-application.yaml
 
-      # Worth noting: the original v6 version of this workflow also saved
+      # Worth noting: earlier versions of this workflow also saved
       # SECURITY_GROUP_ID (as a repo variable) and KUBECONFIG_B64 (as a
-      # repo secret) here, using ADMIN_PAT. Neither is restored in v8 -
-      # v7's own docs already flagged both as dead weight by that point,
-      # since nothing has read either of them since ArgoCD took over
-      # deploying. No sense bringing back code that was already known to
-      # be unused.
+      # repo secret) here, using an admin PAT. Neither is restored -
+      # v9 goes a step further than v8 already did and moves the one
+      # value that's still genuinely needed (the security group ID)
+      # into a plain step output instead, and the operational values
+      # anything else might need (server IP, ALB DNS) now live in SSM
+      # Parameter Store, written above. No admin PAT is needed anywhere
+      # in this workflow anymore.
       - name: Take the temporary SSH and API access back out
         if: always() && inputs.action == 'apply'
         run: |
@@ -271,6 +336,31 @@ jobs:
 
       # ---------- destroy path ----------
 
-      - name: Terraform destroy
+      # Stacks come down in the exact reverse order they went up in.
+      # CloudFormation won't allow a stack to be deleted while another
+      # stack still has an active Fn::ImportValue reference to one of
+      # its Exports, so this order isn't just tidy - deleting out of
+      # order would fail outright.
+      - name: Delete the load balancer stack
         if: inputs.action == 'destroy'
-        run: terraform destroy -auto-approve -var="my_ip=${{ vars.MY_IP }}"
+        run: aws cloudformation delete-stack --stack-name devops-pipeline-loadbalancer
+
+      - name: Wait for the load balancer stack to finish deleting
+        if: inputs.action == 'destroy'
+        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-loadbalancer
+
+      - name: Delete the compute stack
+        if: inputs.action == 'destroy'
+        run: aws cloudformation delete-stack --stack-name devops-pipeline-compute
+
+      - name: Wait for the compute stack to finish deleting
+        if: inputs.action == 'destroy'
+        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-compute
+
+      - name: Delete the network stack
+        if: inputs.action == 'destroy'
+        run: aws cloudformation delete-stack --stack-name devops-pipeline-network
+
+      - name: Wait for the network stack to finish deleting
+        if: inputs.action == 'destroy'
+        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-network

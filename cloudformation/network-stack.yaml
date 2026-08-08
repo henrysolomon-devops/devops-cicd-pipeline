@@ -1,0 +1,154 @@
+# This is the first of three CloudFormation stacks that replace what
+# terraform/ used to manage in a single state file. Splitting it this
+# way mirrors how a lot of real infrastructure teams organize things -
+# a network layer that barely ever changes, sitting underneath layers
+# that change much more often (the server, the load balancer). Each
+# layer gets its own stack, its own lifecycle, and its own blast radius.
+#
+# This stack builds the same VPC, public subnet, internet gateway, and
+# route table that terraform/network.tf used to - same CIDR ranges, same
+# naming, so nothing about the network itself actually changes, only the
+# tool that describes it.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  devops-cicd-pipeline - networking layer (VPC, public subnet, internet
+  gateway, route table). Deployed and torn down as its own stack so the
+  compute and load balancer stacks can be rebuilt independently without
+  ever touching the network underneath them.
+
+Resources:
+  # 10.0.0.0/16 is far more address space than one EC2 instance will
+  # ever need, but it's the conventional starting range almost everyone
+  # reaches for, so there's no real reason to pick something smaller
+  # and more unusual just to save address space nobody will use.
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-vpc
+
+  # Just a slice carved out of the VPC above. It only actually becomes
+  # "public" once it's wired up to the internet gateway and route table
+  # further down - the name alone doesn't do anything on its own.
+  #
+  # This is the only subnet the EC2 instance itself ever lives in - see
+  # PublicSubnetTwo below for why a second, otherwise-unused subnet also
+  # exists in this stack now.
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      # Pinning to the first AZ CloudFormation reports for this region,
+      # the same way network.tf pinned to "${var.aws_region}a" - a
+      # single EC2 instance doesn't need multi-AZ placement, so there's
+      # no reason to complicate this with an AZ parameter.
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-public-subnet
+
+  # Added in v9, purely to satisfy a real AWS constraint: an Application
+  # Load Balancer refuses to deploy into a single Availability Zone, it
+  # always needs at least two subnets in two different AZs, even when
+  # every actual server sits in just one of them. This subnet never
+  # holds an EC2 instance - its only job is giving the ALB (built in
+  # loadbalancer-stack.yaml) a second AZ to register against. Costs
+  # nothing on its own; an empty subnet has no billable resources in it.
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-public-subnet-two
+
+  # The actual door between this VPC and the internet. Without this,
+  # the server could exist just fine internally, but nothing outside
+  # AWS could reach it, and it couldn't reach out either.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-igw
+
+  # An Internet Gateway has to be explicitly attached to a VPC before
+  # it does anything - creating it alone isn't enough.
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Route table - basically a set of directions for traffic. This one
+  # says: anything leaving the subnet for an address outside the VPC
+  # (0.0.0.0/0) goes out through the gateway above.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    # Depends on the gateway actually being attached first - without
+    # this, CloudFormation can try to create the route before the
+    # gateway is usable and the deploy fails.
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # The route table doesn't do anything until it's actually attached to
+  # a subnet - this is that attachment.
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Same route table, same internet access - the second subnet only
+  # exists for the ALB's AZ requirement, but it still needs a path out
+  # to the internet like any other public subnet would.
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref PublicRouteTable
+
+# Everything below gets picked up by the compute stack next, through
+# Fn::ImportValue. Export names are fixed strings rather than anything
+# derived from the stack's own name, so the compute stack can reference
+# them reliably no matter what this stack happens to be called at
+# deploy time.
+Outputs:
+  VpcId:
+    Description: ID of the VPC, needed by the compute and load balancer stacks
+    Value: !Ref VPC
+    Export:
+      Name: devops-pipeline-vpc-id
+
+  PublicSubnetId:
+    Description: ID of the public subnet, needed by the compute stack for the EC2 instance
+    Value: !Ref PublicSubnet
+    Export:
+      Name: devops-pipeline-public-subnet-id
+
+  PublicSubnetTwoId:
+    Description: ID of the second public subnet, needed by the load balancer stack to satisfy the ALB's multi-AZ requirement
+    Value: !Ref PublicSubnetTwo
+    Export:
+      Name: devops-pipeline-public-subnet-two-id

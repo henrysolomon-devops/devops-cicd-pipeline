@@ -1,0 +1,222 @@
+# The third and last of the three stacks. This one builds the actual
+# front door for the whole project: an Application Load Balancer that
+# replaces the old model of "three ports, one server, remembered by
+# heart" with a single address that routes by URL path instead -
+# /dev/*, /staging/*, /production/* all landing on the same ALB DNS
+# name, each forwarded to its own Target Group.
+#
+# It depends on both earlier stacks: the two public subnets from the
+# network stack (an ALB needs at least two AZs, see network-stack.yaml
+# for why), and the server's instance ID and security group from the
+# compute stack. Nothing in this file ever touches those stacks
+# directly - everything comes in through Fn::ImportValue.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  devops-cicd-pipeline - load balancer layer (ALB, three per-environment
+  target groups, path-based listener rules). The only stack that opens
+  the app up to the public internet; everything else stays private or
+  restricted to a single operator IP.
+
+Resources:
+  # The ALB's own security group. This is deliberately the only thing
+  # in the whole project that's open to the entire internet on purpose
+  # - it's the front door, that's the point of it. Nothing about the
+  # server itself is reachable directly anymore; see the ingress rule
+  # further down that's the one and only way traffic reaches the app
+  # server's own security group now.
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: devops-pipeline-alb-sg
+      GroupDescription: Security group for the ALB - open to the internet on port 80, the intended public entry point
+      VpcId: !ImportValue devops-pipeline-vpc-id
+      SecurityGroupIngress:
+        - Description: HTTP, open to everyone - this is the public entry point
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-alb-sg
+
+  # This is the rule that actually replaces the old "app ports open to
+  # my own IP" behavior. Rather than adding it inline to the app
+  # server's security group (which would mean compute-stack.yaml has to
+  # know the ALB's security group exists, creating a circular
+  # dependency between the two stacks), it's added here as its own
+  # standalone resource, referencing the app server's security group by
+  # its exported ID. The source is the ALB's security group itself, not
+  # an IP range - meaning only traffic that's already passed through
+  # the ALB can ever reach these ports.
+  AlbToAppServerIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue devops-pipeline-app-server-sg-id
+      IpProtocol: tcp
+      FromPort: 5000
+      ToPort: 5002
+      SourceSecurityGroupId: !GetAtt AlbSecurityGroup.GroupId
+      Description: App NodePorts (dev/staging/production), reachable only from the ALB
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: devops-pipeline-alb
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt AlbSecurityGroup.GroupId
+      Subnets:
+        - !ImportValue devops-pipeline-public-subnet-id
+        - !ImportValue devops-pipeline-public-subnet-two-id
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-alb
+
+  # One Target Group per environment, each pointed at the same EC2
+  # instance but a different NodePort - dev's k3s Service listens on
+  # 5000, staging's on 5001, production's on 5002, exactly like before,
+  # just reached through the ALB now instead of directly.
+  #
+  # The health check path is deliberately left unprefixed. /health isn't
+  # something a user reaches through the ALB's path routing - it's an
+  # internal endpoint that Kubernetes' own liveness/readiness probes hit
+  # directly against the Pod, the same way they have since v2, and the
+  # ALB's health check here is doing the exact same kind of direct check,
+  # just at the instance/NodePort level instead. Prefixing it would mean
+  # updating the probe path in deployment.yaml too, for no real benefit.
+  DevTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: devops-pipeline-dev-tg
+      Port: 5000
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !ImportValue devops-pipeline-vpc-id
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !ImportValue devops-pipeline-server-instance-id
+          Port: 5000
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-dev-tg
+
+  StagingTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: devops-pipeline-staging-tg
+      Port: 5001
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !ImportValue devops-pipeline-vpc-id
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !ImportValue devops-pipeline-server-instance-id
+          Port: 5001
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-staging-tg
+
+  ProductionTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: devops-pipeline-production-tg
+      Port: 5002
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !ImportValue devops-pipeline-vpc-id
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !ImportValue devops-pipeline-server-instance-id
+          Port: 5002
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-production-tg
+
+  # The listener itself. Its default action deliberately does NOT
+  # forward to any environment - hitting the bare ALB address with no
+  # path isn't a request any environment actually knows how to answer
+  # (the app only responds under /dev, /staging, or /production now),
+  # so a plain 404 here is more honest than silently routing "/" to
+  # whichever environment happened to be listed first.
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: text/plain
+            MessageBody: "Not found. Try /dev, /staging, or /production."
+
+  # Each rule matches everything under its environment's path prefix
+  # and forwards to that environment's Target Group. Priority just needs
+  # to be unique across rules on the same listener - lower numbers are
+  # evaluated first, but since these three paths can never overlap with
+  # each other, the actual ordering between them doesn't matter here.
+  DevListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /dev
+            - /dev/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref DevTargetGroup
+
+  StagingListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /staging
+            - /staging/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref StagingTargetGroup
+
+  ProductionListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /production
+            - /production/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ProductionTargetGroup
+
+# Picked up by infra.yml, which writes this into SSM Parameter Store
+# right after the stack finishes deploying, the same way the server's
+# own public IP gets written there from the compute stack.
+Outputs:
+  LoadBalancerDnsName:
+    Description: Public DNS name of the ALB - the one address every environment is now reachable through
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
