@@ -42,6 +42,22 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@v4
 
+      # TEMPORARY - added only to diagnose the AssumeRoleWithWebIdentity
+      # failure. Prints the actual sub/aud claims GitHub is sending, so
+      # they can be compared directly against the trust policy instead
+      # of guessing. Remove this step once the role is confirmed working.
+      - name: DEBUG - show the real OIDC token claims
+        run: |
+          IDTOKEN=$(curl -sSL -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          python3 -c "
+          import base64, json, sys
+          token = sys.argv[1]
+          payload = token.split('.')[1]
+          padded = payload + '=' * (-len(payload) % 4)
+          print(json.dumps(json.loads(base64.urlsafe_b64decode(padded)), indent=2))
+          " "$IDTOKEN"
+
       # This role is new in v9 and deliberately separate from the old
       # github-actions-terraform-role - that one is left completely
       # alone so any earlier tag (v5.1 through v8.1) can still be
