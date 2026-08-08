@@ -28,4 +28,4 @@ service:
 # request - never edited by hand, and never touched directly by
 # deploy.yml the way values-dev.yaml is.
 image:
-  tag: "90f4461a865e0caba157e787088bba6ad312313b"
+  tag: "ddbfa4887b6fbf9a9e89fff2bb242d3f4ef05362"
