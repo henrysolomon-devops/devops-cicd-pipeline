@@ -2,7 +2,7 @@
 # by infra.yml into the "monitoring" namespace. This is the single
 # source of truth for how Prometheus and Grafana are configured - none
 # of this is ever clicked together by hand, so it survives every
-# terraform destroy/apply cycle exactly the same way every time.
+# infra destroy/apply cycle exactly the same way every time.
 
 prometheus:
   prometheusSpec:
@@ -71,9 +71,23 @@ grafana:
   service:
     type: LoadBalancer
     # A new port, separate from every app port (5000-5002) and the k3s
-    # API (6443). Needs its own permanent rule in terraform/security.tf,
-    # scoped to MY_IP only, the same way SSH and the k3s API already are.
+    # API (6443). Needs its own permanent rule in
+    # cloudformation/compute-stack.yaml, scoped to MyIp only, the same
+    # way SSH and the k3s API already are.
     port: 3000
+    # Added in v9. Any Service of type LoadBalancer also gets an
+    # automatically-assigned NodePort behind the scenes, even though
+    # actual access to Grafana never goes through it directly - Klipper
+    # (k3s's built-in load balancer) serves this on the node's own
+    # network on port 3000 above, completely separately. That auto-
+    # assigned NodePort still has to come from somewhere though, and
+    # once the valid NodePort range was narrowed to 5000-5010 for the
+    # app's own ALB-facing ports, Grafana's random pick started landing
+    # right on top of one of them (5002, specifically - the same port
+    # production's Target Group expects). Pinning it explicitly here,
+    # to a value outside 5000-5002, is what stops that collision from
+    # happening again on every fresh install.
+    nodePort: 5010
 
   sidecar:
     dashboards:
@@ -109,9 +123,9 @@ grafana:
 
   # No login screen. This mirrors the exact reasoning used for Jenkins
   # in v7 (securityRealm: None there): access to this port is already
-  # restricted at the network level, to MY_IP only, via security.tf, so
-  # a login prompt on top of that would just be friction with no real
-  # security benefit.
+  # restricted at the network level, to MyIp only, via
+  # cloudformation/compute-stack.yaml, so a login prompt on top of that
+  # would just be friction with no real security benefit.
   grafana.ini:
     auth.anonymous:
       enabled: true
