@@ -18,4 +18,4 @@ service:
 # a tag has already been confirmed working in staging and the
 # resulting pull request has been reviewed and merged by hand.
 image:
-  tag: "53bd7877b58770943427e28e263805fcff1f3b41"
+  tag: "0b4cafbed768db6411e3e50659626198aac2471d"
