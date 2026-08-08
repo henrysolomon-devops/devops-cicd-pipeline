@@ -1,9 +1,16 @@
 1. Get the application URL:
-{{- if contains "LoadBalancer" .Values.service.type }}
-  # Since v5.1, this app runs with service.type: LoadBalancer on every
-  # environment - k3s's built-in Klipper load balancer exposes it directly
-  # on the server's own public IP, on this environment's own port, no
-  # port-forward needed.
+{{- if contains "NodePort" .Values.service.type }}
+  # Since v9, this app runs with service.type: NodePort on every
+  # environment - it's no longer reachable directly on its own port.
+  # The ALB (built in cloudformation/loadbalancer-stack.yaml) is the
+  # actual front door now, routing by URL path instead of by port.
+  echo "Visit http://<alb-dns-name>{{ .Values.appUrlPrefix }} to use your application"
+  echo "(The ALB's DNS name is written to SSM Parameter Store by infra.yml after each deploy.)"
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  # k3s's built-in Klipper load balancer exposes this directly on the
+  # server's own public IP, on this environment's own port, no
+  # port-forward needed. Kept here for reference - this was the model
+  # used from v5.1 through v8.1, before the ALB replaced it in v9.
   echo "Visit http://<server-ip>:{{ .Values.service.port }} to use your application"
 {{- else if contains "ClusterIP" .Values.service.type }}
   export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "devops-pipeline.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
@@ -11,5 +18,5 @@
   echo "Visit http://127.0.0.1:8080 to use your application"
   kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
 {{- else }}
-  echo "This chart supports service.type: LoadBalancer or ClusterIP in this project."
+  echo "This chart supports service.type: NodePort, LoadBalancer, or ClusterIP in this project."
 {{- end }}

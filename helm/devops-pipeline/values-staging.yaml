@@ -10,10 +10,18 @@ replicaCount: 2
 # you're looking at this namespace.
 appEnv: "staging"
 
+# Added in v9: this is the path prefix the ALB forwards to this
+# environment - anything under /staging/* on the ALB's single public
+# address lands here. See app/app.py for how the app itself uses this.
+appUrlPrefix: "/staging"
+
 # staging gets its own port since it now lives on the same server and
-# the same public IP as dev and production.
+# the same public IP as dev and production. nodePort has to match this
+# exactly, since that's the fixed port the ALB's staging Target Group
+# in cloudformation/loadbalancer-stack.yaml was pointed at.
 service:
   port: 5001
+  nodePort: 5001
 
 # This only ever gets updated by promote.yml, when a tag already
 # confirmed working in dev is promoted here through a reviewed pull

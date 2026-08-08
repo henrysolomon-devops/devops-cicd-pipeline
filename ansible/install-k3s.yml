@@ -1,7 +1,7 @@
 ---
-# Installs k3s on the EC2 instance Terraform just created. k3s ships its
-# own install script that handles the binary, the systemd service, and
-# the internal networking in one shot - way less moving parts than a
+# Installs k3s on the EC2 instance CloudFormation just created. k3s ships
+# its own install script that handles the binary, the systemd service,
+# and the internal networking in one shot - way less moving parts than a
 # full kubeadm-based Kubernetes install.
 - name: Install k3s on the pipeline server
   hosts: all
@@ -32,8 +32,15 @@
         # and hitting a lock error.
         lock_timeout: 180
 
+    # Added in v9. Kubernetes only allows NodePort values between
+    # 30000-32767 by default, but the ALB's Target Groups are configured
+    # against the same 5000/5001/5002 ports this project has used since
+    # v1, and there was no real reason to abandon that just because the
+    # traffic now arrives through a load balancer instead of directly.
+    # This flag widens the allowed range on the API server itself so
+    # those specific ports become valid NodePort values.
     - name: Download and run the official k3s install script
-      shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--tls-san {{ tls_san }}" sh -
+      shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--tls-san {{ tls_san }} --kube-apiserver-arg=service-node-port-range=5000-5002" sh -
       args:
         creates: /usr/local/bin/k3s
 

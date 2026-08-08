@@ -10,9 +10,18 @@ replicaCount: 3
 # you're looking at this namespace.
 appEnv: "production"
 
-# production gets its own port too, same reasoning as staging.
+# Added in v9: this is the path prefix the ALB forwards to this
+# environment - anything under /production/* on the ALB's single public
+# address lands here. See app/app.py for how the app itself uses this.
+appUrlPrefix: "/production"
+
+# production gets its own port too, same reasoning as staging. nodePort
+# has to match this exactly, since that's the fixed port the ALB's
+# production Target Group in cloudformation/loadbalancer-stack.yaml
+# was pointed at.
 service:
   port: 5002
+  nodePort: 5002
 
 # Same story as staging - this only changes through promote.yml, once
 # a tag has already been confirmed working in staging and the

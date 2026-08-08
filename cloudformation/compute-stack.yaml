@@ -1,0 +1,226 @@
+# The second of three stacks. This one builds the actual server the app
+# runs on - the EC2 instance itself, its Elastic IP, the security group
+# guarding it, and the IAM Instance Profile that lets Loki (running
+# inside k3s on this box since v8.1) reach its S3 bucket without any
+# access key ever touching Git or a Kubernetes Secret.
+#
+# It depends on the network stack for its VPC and subnet, imported below
+# through Fn::ImportValue rather than passed in as parameters - that way
+# this stack always uses whatever network currently exists, without
+# anyone having to remember to pass the right IDs in by hand.
+#
+# One thing worth flagging up front: unlike terraform/security.tf, this
+# stack does NOT open the app ports (5000-5002) to anyone, not even my
+# own IP. Now that a load balancer sits in front of the app, direct
+# access to those ports is exactly what should go away - the ALB is
+# meant to be the only front door. The rule that actually allows traffic
+# in on those ports lives in loadbalancer-stack.yaml instead, scoped to
+# the ALB's own security group specifically, so this stack never has to
+# know the load balancer exists.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  devops-cicd-pipeline - compute layer (EC2 instance, Elastic IP, app
+  server security group, and Loki's IAM Instance Profile). Depends on
+  the network stack's exported VPC and subnet.
+
+Parameters:
+  MyIp:
+    Type: String
+    Description: >
+      Your own public IP address in CIDR form (e.g. 203.0.113.4/32),
+      used to restrict SSH, the k3s API, and the Grafana UI to just you.
+      No default on purpose - this is different for whoever's running
+      the deploy, so it always has to be passed in explicitly.
+
+  PublicKeyMaterial:
+    Type: String
+    Description: >
+      Contents of your SSH public key file (e.g. the output of
+      `cat ~/.ssh/devops-pipeline-key.pub`). CloudFormation has no
+      equivalent of Terraform's file() function, so the key content
+      itself gets passed in as a parameter rather than a path.
+
+  LokiLogsBucketName:
+    Type: String
+    Default: devops-cicd-pipeline-loki-logs
+    Description: >
+      Name of the manually-created S3 bucket Loki uses for log chunk
+      storage. This bucket lives outside every stack on purpose, the
+      same way it lived outside Terraform's state - so tearing this
+      stack down can never take the log history with it.
+
+  UbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: >
+      Resolved automatically at deploy time from Canonical's own public
+      SSM parameter, which always points at the current official Ubuntu
+      24.04 AMI for whatever region this stack deploys into - the same
+      "always the latest, never a stale hardcoded ID" behavior the old
+      aws_ami data source gave us in Terraform.
+
+Resources:
+  # Importing the public key generated locally instead of letting AWS
+  # generate a brand new key pair - the private half never has to touch
+  # AWS at all, only this public half gets uploaded.
+  AppServerKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: devops-pipeline-key
+      PublicKeyMaterial: !Ref PublicKeyMaterial
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-key
+
+  # k3s has no IRSA - that's an EKS-specific feature for giving
+  # individual Pods their own AWS identity - so the next best option is
+  # an IAM Instance Profile on the EC2 instance itself. Every process on
+  # this box, including Loki running inside k3s, can reach S3 through
+  # the instance's own temporary credentials.
+  LokiS3AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: devops-cicd-pipeline-loki-s3-access
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      # Scoped to exactly the one bucket Loki needs, nothing else in the
+      # account - the same least-privilege approach the Terraform state
+      # bucket policy used back in v5.1.
+      Policies:
+        - PolicyName: loki-s3-bucket-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "arn:aws:s3:::${LokiLogsBucketName}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${LokiLogsBucketName}"
+
+  # EC2 doesn't accept an IAM role directly - it has to be wrapped in an
+  # Instance Profile first, which is what actually gets attached to the
+  # instance below.
+  LokiS3AccessInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: devops-cicd-pipeline-loki-s3-access
+      Roles:
+        - !Ref LokiS3AccessRole
+
+  # SSH, the k3s API, and Grafana all stay permanently open to my own
+  # IP only, exactly like before - none of that changes just because a
+  # load balancer is being introduced. What's gone is the app-port rule;
+  # see the note at the top of this file for why.
+  AppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: devops-pipeline-sg
+      GroupDescription: >-
+        Security group for the EC2/k3s server - SSH, the k3s API, and
+        Grafana are always open for me. App traffic comes in through
+        the ALB only, via a rule added in the load balancer stack.
+      VpcId: !ImportValue devops-pipeline-vpc-id
+      SecurityGroupIngress:
+        - Description: SSH, only from my own machine
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref MyIp
+        - Description: k3s API, always reachable from my own machine
+          IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+          CidrIp: !Ref MyIp
+        - Description: Grafana UI, always reachable from my own machine
+          IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: !Ref MyIp
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-sg
+
+  # Bumped to t3.large back in v8 once kube-prometheus-stack joined k3s,
+  # ArgoCD, and the app on this one box - still the right size here,
+  # nothing about v9 adds meaningful new load to the instance itself.
+  AppServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref UbuntuAmiId
+      InstanceType: t3.large
+      SubnetId: !ImportValue devops-pipeline-public-subnet-id
+      SecurityGroupIds:
+        - !Ref AppServerSecurityGroup
+      KeyName: !Ref AppServerKeyPair
+      IamInstanceProfile: !Ref LokiS3AccessInstanceProfile
+      # AWS defaults the IMDS hop limit to 1, which is fine for a process
+      # running directly on the host, but Loki runs one network layer
+      # deeper - inside a container, inside k3s. That extra hop means the
+      # default limit silently blocks Loki from ever reaching the
+      # metadata service, so raising this to 2 is required for it to
+      # actually pick up credentials from the instance profile above.
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+      # The default AMI's root volume filled up completely back in v8
+      # once it had to hold every image for k3s, ArgoCD, and the full
+      # monitoring stack at once - 30GB leaves comfortable headroom.
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-server
+
+  # A static public IP that stays locked to the instance no matter what
+  # happens underneath it. Without this, every rebuild hands out a brand
+  # new IP and Ansible, the k3s TLS cert, and the kubeconfig would all
+  # need chasing down and updating by hand every time.
+  AppServerEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref AppServerInstance
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-eip
+
+# Picked up by both the load balancer stack (to register this instance
+# as a target, and to add the ALB-only ingress rule to the security
+# group) and by infra.yml (to hand the IP to Ansible and write it into
+# SSM Parameter Store for anything else that needs it).
+Outputs:
+  ServerPublicIp:
+    Description: Static public IP address of the EC2 instance (Elastic IP)
+    Value: !Ref AppServerEIP
+    Export:
+      Name: devops-pipeline-server-public-ip
+
+  ServerInstanceId:
+    Description: EC2 instance ID, needed by the load balancer stack to register this server as a target
+    Value: !Ref AppServerInstance
+    Export:
+      Name: devops-pipeline-server-instance-id
+
+  AppServerSecurityGroupId:
+    Description: Security group ID, needed by the load balancer stack to grant the ALB access to the app ports
+    Value: !Ref AppServerSecurityGroup
+    Export:
+      Name: devops-pipeline-app-server-sg-id

@@ -10,6 +10,11 @@ replicaCount: 1
 # looking at this namespace.
 appEnv: "dev"
 
+# Added in v9: this is the path prefix the ALB forwards to this
+# environment - anything under /dev/* on the ALB's single public
+# address lands here. See app/app.py for how the app itself uses this.
+appUrlPrefix: "/dev"
+
 # Before v6, this tag was never stored in a file at all - deploy.yml
 # passed it straight to Helm with --set image.tag=<sha> at deploy time.
 # Now that ArgoCD is the one applying changes (by reading this file,
@@ -20,9 +25,10 @@ appEnv: "dev"
 image:
   tag: "0b4cafbed768db6411e3e50659626198aac2471d"
 
-# No service.port override needed here - the base values.yaml default
-# (5000) already is dev's port. staging and production each override
-# it below since they need their own distinct port on the same server.
+# No service.port/nodePort override needed here - the base values.yaml
+# default (5000) already is dev's port. staging and production each
+# override it below since they need their own distinct port on the
+# same server.
 
 # Added in v8: this Release is the one that carries the shared Grafana
 # dashboard ConfigMap, since it only needs to be registered with

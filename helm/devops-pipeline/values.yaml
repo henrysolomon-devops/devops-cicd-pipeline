@@ -28,6 +28,14 @@ image:
 # running Pod actually knows which namespace it's living in.
 appEnv: "unknown"
 
+# Added in v9. The path prefix this environment is reached under once
+# requests come through the ALB instead of hitting a dedicated port
+# directly - /dev, /staging, or /production, set per environment below.
+# Left blank here on purpose: with no override, the app just runs
+# unprefixed at the root, which matters for local testing outside the
+# cluster entirely (see app/app.py for the full reasoning).
+appUrlPrefix: ""
+
 # The ghcr.io package for this project is public, so no pull secret is
 # needed for the cluster to fetch images from it.
 imagePullSecrets: []
@@ -41,17 +49,24 @@ podLabels: {}
 podSecurityContext: {}
 securityContext: {}
 
-# Since v5.1, this needs to be reachable directly from outside the
-# cluster (the whole point of moving off kind was to test against a
-# real public IP), so the type is LoadBalancer everywhere now - k3s's
-# built-in Klipper load balancer handles this without needing a real
-# AWS load balancer. The port itself differs per environment (see the
-# per-environment override files) so dev/staging/production can all be
-# reached separately on the same server, on different ports.
+# Changed in v9. From v5.1 through v8.1, this was LoadBalancer, with
+# k3s's built-in Klipper load balancer exposing each environment
+# directly on the server's public IP. Now that a real AWS ALB sits in
+# front of everything (see cloudformation/loadbalancer-stack.yaml),
+# Klipper's job is gone - the ALB's Target Groups reach the app through
+# a NodePort instead, registered directly against the EC2 instance and
+# a fixed port per environment. That port has to be pinned explicitly
+# with nodePort below rather than left to Kubernetes to assign
+# randomly, since the Target Group in CloudFormation is configured
+# against a specific, known port ahead of time. k3s's own NodePort
+# range is widened to allow 5000-5002 specifically in
+# ansible/install-k3s.yml, since Kubernetes only allows NodePort
+# values from 30000-32767 by default.
 service:
-  type: LoadBalancer
+  type: NodePort
   port: 5000
   targetPort: 5000
+  nodePort: 5000
 
 # Added in v8, alongside the rest of the monitoring stack: without
 # explicit limits, a single greedy Pod (Prometheus is the usual
@@ -68,7 +83,11 @@ resources:
     memory: 128Mi
 
 # Liveness/readiness probes, matching k8s/deployment.yaml from v2:
-# both check GET /health on the container's port 5000.
+# both check GET /health on the container's port 5000. Still unprefixed
+# even after v9's APP_URL_PREFIX was introduced - Kubernetes talks to
+# the Pod directly here, never through the ALB's path routing, so
+# there's nothing for a prefix to do in this specific check. See
+# app/app.py for the full reasoning on why /health stays unprefixed.
 livenessProbe:
   httpGet:
     path: /health

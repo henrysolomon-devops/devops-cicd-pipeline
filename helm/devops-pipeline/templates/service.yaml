@@ -16,5 +16,15 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+      # Added in v9. Only meaningful when service.type is NodePort - this
+      # pins the externally-reachable port to a known, fixed value
+      # (5000/5001/5002) instead of letting Kubernetes assign one at
+      # random from its NodePort range. The ALB's Target Groups in
+      # cloudformation/loadbalancer-stack.yaml are each configured
+      # against one of these exact ports ahead of time, so this has to
+      # stay predictable rather than change on every reinstall.
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
   selector:
     {{- include "devops-pipeline.selectorLabels" . | nindent 4 }}
