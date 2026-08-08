@@ -17,7 +17,7 @@ The goal isn't just to run the commands, but to understand why each tool is used
 | v6.0 | ArgoCD | GitOps-based Continuous Deployment | ✅ Done |
 | v7.0 | Jenkins pipeline (alternative to Actions) | Alternative CI tooling | ✅ Done |
 | v8.0 | Prometheus + Grafana | Observability & monitoring | ✅ Done |
-| v8.1 | Loki + Grafana Alloy + Alertmanager | Log aggregation & alerting | 🔜 Next |
+| v8.1 | Loki + Grafana Alloy + Alertmanager | Log aggregation & alerting | ✅ Done |
 | v9.0 | Load Balancer + AWS CloudFormation | Networking, alternative IaC | ⏳ Planned |
 
 ## Project structure
@@ -27,13 +27,12 @@ Each tool gets its own folder at the repo root, added as the version that introd
     devops-cicd-pipeline/
     ├── app/         # Application source code (v1, Redis + Open-Meteo + /metrics added in v8)
     ├── docker/      # Dockerfile + .dockerignore (v1)
-    ├── helm/        # Helm chart (v3, Redis/ServiceMonitor/dashboard templates added in v8)
+    ├── helm/        # Helm chart (v3, Redis/ServiceMonitor/dashboard templates added in v8, app-level alerting rules added in v8.1)
     ├── .github/     # GitHub Actions workflows (v4, extended in v5.1)
-    ├── terraform/   # Infrastructure as Code (v5, remote state added in v5.1)
+    ├── terraform/   # Infrastructure as Code (v5, remote state added in v5.1, Loki IAM access added in v8.1)
     ├── ansible/     # Configuration management (v5)
     ├── argocd/      # GitOps application definitions (v6, recovered in v8 after v7's detour)
-    ├── monitoring/  # Prometheus + Grafana config (v8)
-    ├── loki/        # Log aggregation config (v8.1, not yet added)
+    ├── monitoring/  # Prometheus + Grafana config (v8, Loki/Alloy/Alertmanager config added in v8.1)
     └── docs/        # Detailed per-version guides (setup, testing, reasoning)
 
 ## v1: Flask app + Docker + HTML dashboard
@@ -89,6 +88,12 @@ A second EC2 instance, `jenkins-server`, ran a fully self-hosted Jenkins control
 Real observability, for the first time: `kube-prometheus-stack` (Prometheus, Grafana, node-exporter, kube-state-metrics) is installed automatically as part of `infra.yml`, right alongside the ArgoCD setup restored from v6. The app now exposes custom metrics at `/metrics` - request rate and latency for every route, plus call duration, error rate, and cache hit/miss counters for a new Los Angeles weather feature (a real Open-Meteo API call, cached briefly in a lightweight per-namespace Redis with no persistent storage). A custom Grafana dashboard, defined as a JSON file in the repo rather than clicked together by hand, covers all of it with an environment switcher for dev/staging/production. Grafana itself runs with no login screen, since access is already restricted at the network level to a single IP.
 
 📄 [Full guide: setup, testing, and reasoning](./docs/v8-observability.md)
+
+## v8.1: Loki + Grafana Alloy + Alertmanager (Log Aggregation & Alerting)
+
+Adds log aggregation and alerting on top of v8's metrics-only observability stack. Grafana Alloy (the current standard, replacing the now end-of-life Promtail) collects logs from every Pod across every namespace and ships them to Loki, which stores them in a dedicated S3 bucket so log history survives a `terraform destroy`/`apply` cycle the same way Terraform's own state already does - accessed via an IAM Instance Profile on the EC2 instance, since k3s has no IRSA. Alertmanager, bundled with `kube-prometheus-stack` since v8 but left disabled until now, routes alerts to two separate Slack channels (`#alerts-infra` and `#alerts-app`) based on a `team` label carried by every alerting rule. A new "Live Logs" panel on the existing app dashboard uses the same environment switcher already in place for metrics.
+
+📄 [Full guide: setup, testing, and reasoning](./docs/v8.1-observability-logging.md)
 
 ## License
 
