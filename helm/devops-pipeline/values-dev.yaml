@@ -23,7 +23,7 @@ appUrlPrefix: "/dev"
 # to read. deploy.yml's dev job overwrites this value automatically on
 # every build - there's no need to ever edit it by hand.
 image:
-  tag: "0b4cafbed768db6411e3e50659626198aac2471d"
+  tag: "90f4461a865e0caba157e787088bba6ad312313b"
 
 # No service.port/nodePort override needed here - the base values.yaml
 # default (5000) already is dev's port. staging and production each
