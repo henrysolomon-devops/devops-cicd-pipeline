@@ -142,10 +142,10 @@ Resources:
           FromPort: 6443
           ToPort: 6443
           CidrIp: !Ref MyIp
-        - Description: Grafana UI, always reachable from my own machine
+        - Description: Grafana UI (NodePort, since v9), always reachable from my own machine
           IpProtocol: tcp
-          FromPort: 3000
-          ToPort: 3000
+          FromPort: 5010
+          ToPort: 5010
           CidrIp: !Ref MyIp
       SecurityGroupEgress:
         - IpProtocol: "-1"

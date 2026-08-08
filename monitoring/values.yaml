@@ -69,24 +69,23 @@ alertmanager:
 
 grafana:
   service:
-    type: LoadBalancer
-    # A new port, separate from every app port (5000-5002) and the k3s
-    # API (6443). Needs its own permanent rule in
+    # Changed in v9 from LoadBalancer to NodePort. The chart's own
+    # Service template only renders an explicit nodePort when type is
+    # exactly "NodePort" - under LoadBalancer, the nodePort value below
+    # was being silently ignored and Kubernetes assigned a random one
+    # instead, which is what caused the collision with the app's own
+    # ports in the first place. Access moves from
+    # http://<server-ip>:3000 to http://<server-ip>:5010 as a result -
+    # a different port, not a fundamentally different way of reaching
+    # it, since kube-proxy serves NodePort traffic on every Node
+    # directly, without needing Klipper the way LoadBalancer did.
+    type: NodePort
+    port: 3000
+    # Pinned explicitly rather than left to Kubernetes to assign at
+    # random - this now actually takes effect, unlike under
+    # LoadBalancer above. Needs its own permanent rule in
     # cloudformation/compute-stack.yaml, scoped to MyIp only, the same
     # way SSH and the k3s API already are.
-    port: 3000
-    # Added in v9. Any Service of type LoadBalancer also gets an
-    # automatically-assigned NodePort behind the scenes, even though
-    # actual access to Grafana never goes through it directly - Klipper
-    # (k3s's built-in load balancer) serves this on the node's own
-    # network on port 3000 above, completely separately. That auto-
-    # assigned NodePort still has to come from somewhere though, and
-    # once the valid NodePort range was narrowed to 5000-5010 for the
-    # app's own ALB-facing ports, Grafana's random pick started landing
-    # right on top of one of them (5002, specifically - the same port
-    # production's Target Group expects). Pinning it explicitly here,
-    # to a value outside 5000-5002, is what stops that collision from
-    # happening again on every fresh install.
     nodePort: 5010
 
   sidecar:
