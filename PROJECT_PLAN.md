@@ -25,6 +25,30 @@ system. The purpose is twofold:
 | v8.0 | Prometheus + Grafana | Observability & monitoring |
 | v8.1 | Loki + Grafana Alloy + Alertmanager | Log aggregation & alerting |
 | v9.0 | Load Balancer + AWS CloudFormation | Networking, alternative IaC |
+| v10.0 | Migrate to Amazon EKS | Managed Kubernetes, IRSA, AWS Load Balancer Controller |
+
+v9 deliberately stays on a single k3s server - no second node, no
+multi-AZ worker pool. Real control-plane HA needs an odd number of
+etcd members (3+), which isn't worth the cost or complexity for a demo
+project, and EKS solves this properly anyway. Rather than build a
+half-way multi-node setup by hand just to replace it later, that whole
+problem is deferred to v10, where EKS handles HA control-plane, IRSA
+(replacing the IAM Instance Profile workaround from v8.1), and
+Ingress-driven load balancing (replacing the hand-written CloudFormation
+ALB from v9) natively. v9's own single-server setup stays intact and
+tagged (`v9.0.0`) as the "how would you build this yourself by hand"
+checkpoint.
+
+v10 is the project's final planned version. There is no in-between
+"multi-node k3s" release (a v9.1) - a hand-rolled multi-node k3s setup
+would only ever be a partial, self-managed imitation of what EKS
+already does correctly and natively, so building it as a separate step
+would mean solving the same problem twice at two different levels of
+quality. Going straight from v9 (single k3s server, hand-built
+CloudFormation + ALB) to v10 (full EKS migration) keeps the project's
+arc coherent: build it by hand first to understand every layer, then
+migrate to the managed equivalent with a clear, demonstrable reason
+for each change.
 
 ## Environment Strategy (from v2 onward)
 
