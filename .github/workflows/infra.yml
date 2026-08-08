@@ -86,12 +86,6 @@ jobs:
           ./get_helm.sh
           rm get_helm.sh
 
-      - name: Write out the SSH public key so CloudFormation can import it
-        if: inputs.action == 'apply'
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ vars.SSH_PUBLIC_KEY }}" > ~/.ssh/devops-pipeline-key.pub
-
       # ---------- apply path ----------
 
       # First of three stacks. No CAPABILITY_NAMED_IAM needed here -
@@ -117,8 +111,7 @@ jobs:
             --stack-name devops-pipeline-compute \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              MyIp="${{ vars.MY_IP }}" \
-              PublicKeyMaterial="$(cat ~/.ssh/devops-pipeline-key.pub)"
+              MyIp="${{ vars.MY_IP }}"
 
       # Third and last stack. No IAM resources here either, so no
       # capability flag needed - just the ALB, its security group, the

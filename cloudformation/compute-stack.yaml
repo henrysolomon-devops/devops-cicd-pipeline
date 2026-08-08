@@ -35,11 +35,26 @@ Parameters:
 
   PublicKeyMaterial:
     Type: String
+    Default: ""
     Description: >
-      Contents of your SSH public key file (e.g. the output of
-      `cat ~/.ssh/devops-pipeline-key.pub`). CloudFormation has no
-      equivalent of Terraform's file() function, so the key content
-      itself gets passed in as a parameter rather than a path.
+      No longer used as of this fix - kept only so an older parameter
+      override in a stale workflow run doesn't hard-fail. See
+      KeyPairName below for how the SSH key is actually handled now.
+
+  KeyPairName:
+    Type: String
+    Default: devops-pipeline-key
+    Description: >
+      Name of an EC2 Key Pair that already exists in this account,
+      created once by hand (see the account setup notes) rather than
+      by this stack. CloudFormation's own AWS::EC2::KeyPair resource
+      type has a known, recurring bug where deleting it fails with an
+      opaque "InternalFailure" - not something worth fighting on every
+      single destroy/apply cycle just to recreate the exact same key
+      pair each time. The Loki S3 bucket in loki-values.yaml made the
+      same call for the same underlying reason: content that doesn't
+      need to be destroyed and rebuilt every cycle shouldn't be forced
+      through that cycle just because everything else around it is.
 
   LokiLogsBucketName:
     Type: String
@@ -61,18 +76,6 @@ Parameters:
       aws_ami data source gave us in Terraform.
 
 Resources:
-  # Importing the public key generated locally instead of letting AWS
-  # generate a brand new key pair - the private half never has to touch
-  # AWS at all, only this public half gets uploaded.
-  AppServerKeyPair:
-    Type: AWS::EC2::KeyPair
-    Properties:
-      KeyName: devops-pipeline-key
-      PublicKeyMaterial: !Ref PublicKeyMaterial
-      Tags:
-        - Key: Name
-          Value: devops-pipeline-key
-
   # k3s has no IRSA - that's an EKS-specific feature for giving
   # individual Pods their own AWS identity - so the next best option is
   # an IAM Instance Profile on the EC2 instance itself. Every process on
@@ -165,7 +168,7 @@ Resources:
       SubnetId: !ImportValue devops-pipeline-public-subnet-id
       SecurityGroupIds:
         - !Ref AppServerSecurityGroup
-      KeyName: !Ref AppServerKeyPair
+      KeyName: !Ref KeyPairName
       IamInstanceProfile: !Ref LokiS3AccessInstanceProfile
       # AWS defaults the IMDS hop limit to 1, which is fine for a process
       # running directly on the host, but Loki runs one network layer
