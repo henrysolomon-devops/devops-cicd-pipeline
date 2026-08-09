@@ -210,10 +210,8 @@ Resources:
       GroupName: devops-pipeline-grafana-nodeport-sg
       GroupDescription: >-
         Allows Grafanas NodePort 5010 through to the worker node,
-        restricted to my own IP - the same only-me rule every version
-        since v5.1 has applied to Grafana, just expressed as its own
-        security group now instead of an inline rule on a hand-built
-        EC2 security group.
+        restricted to my own IP only, same as SSH and the k3s API in
+        every version since v5.1.
       VpcId: !ImportValue devops-pipeline-vpc-id
       SecurityGroupIngress:
         - Description: Grafana UI (NodePort), only from my own machine
