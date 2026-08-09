@@ -233,7 +233,18 @@ Resources:
   GrafanaNodePortSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: devops-pipeline-grafana-nodeport-sg
+      # No explicit GroupName here on purpose. GroupDescription just
+      # below is an immutable property on this resource type - any
+      # future change to its wording, even a pure text fix, forces
+      # CloudFormation to replace this security group entirely rather
+      # than update it in place. If a fixed GroupName is also set,
+      # that replacement collides with the still-existing old physical
+      # resource of the same name and fails with AlreadyExists - which
+      # is exactly what happened switching Grafana's port from 5010 to
+      # 30010 and editing this description's wording in the same
+      # change. Leaving GroupName unset lets AWS generate a unique
+      # name on every replacement, sidestepping the collision for good
+      # - the Tags entry below still gives it a readable identifier.
       GroupDescription: >-
         Allows Grafanas NodePort 30010 through to the worker node,
         restricted to my own IP only, same as SSH and the k3s API in
