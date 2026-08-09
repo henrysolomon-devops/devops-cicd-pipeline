@@ -28,12 +28,12 @@ image:
 # running Pod actually knows which namespace it's living in.
 appEnv: "unknown"
 
-# Added in v9. The path prefix this environment is reached under once
-# requests come through the ALB instead of hitting a dedicated port
-# directly - /dev, /staging, or /production, set per environment below.
-# Left blank here on purpose: with no override, the app just runs
-# unprefixed at the root, which matters for local testing outside the
-# cluster entirely (see app/app.py for the full reasoning).
+# Added in v9, unchanged in v10. The path prefix this environment is
+# reached under once requests come through the ALB - /dev, /staging, or
+# /production, set per environment below. Left blank here on purpose:
+# with no override, the app just runs unprefixed at the root, which
+# matters for local testing outside the cluster entirely (see
+# app/app.py for the full reasoning).
 appUrlPrefix: ""
 
 # The ghcr.io package for this project is public, so no pull secret is
@@ -49,24 +49,34 @@ podLabels: {}
 podSecurityContext: {}
 securityContext: {}
 
-# Changed in v9. From v5.1 through v8.1, this was LoadBalancer, with
-# k3s's built-in Klipper load balancer exposing each environment
-# directly on the server's public IP. Now that a real AWS ALB sits in
-# front of everything (see cloudformation/loadbalancer-stack.yaml),
-# Klipper's job is gone - the ALB's Target Groups reach the app through
-# a NodePort instead, registered directly against the EC2 instance and
-# a fixed port per environment. That port has to be pinned explicitly
-# with nodePort below rather than left to Kubernetes to assign
-# randomly, since the Target Group in CloudFormation is configured
-# against a specific, known port ahead of time. k3s's own NodePort
-# range is widened to allow 5000-5002 specifically in
-# ansible/install-k3s.yml, since Kubernetes only allows NodePort
-# values from 30000-32767 by default.
+# Changed back to ClusterIP in v10. v9 needed NodePort specifically
+# because the ALB's Target Groups were hand-written CloudFormation,
+# registered against a fixed instance:port pair with no other way to
+# discover the app. Now that the AWS Load Balancer Controller reads
+# this straight from a real Kubernetes Ingress (templates/ingress.yaml)
+# and routes with target-type: ip, it talks to each Pod's own IP
+# address directly over the VPC CNI - there's no NodePort, and no fixed
+# port per environment, to reserve or remember anymore. All three
+# environments can now safely use the exact same port number, since
+# each one is a completely separate Service in its own namespace
+# regardless.
 service:
-  type: NodePort
+  type: ClusterIP
   port: 5000
   targetPort: 5000
-  nodePort: 5000
+
+# Added in v10. Controls the Ingress that the AWS Load Balancer
+# Controller turns into a real ALB - see templates/ingress.yaml for the
+# full reasoning behind each annotation this drives. groupName has to
+# be identical across all three environments so the controller merges
+# their three separate Ingress resources into one shared ALB, the same
+# "one address, three paths" model v9 built by hand in CloudFormation.
+# groupOrder is overridden per environment below, the direct equivalent
+# of the old ListenerRule Priority values (10/20/30).
+ingress:
+  enabled: true
+  groupName: devops-pipeline
+  groupOrder: "1"
 
 # Added in v8, alongside the rest of the monitoring stack: without
 # explicit limits, a single greedy Pod (Prometheus is the usual

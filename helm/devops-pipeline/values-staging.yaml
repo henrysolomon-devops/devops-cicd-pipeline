@@ -15,13 +15,15 @@ appEnv: "staging"
 # address lands here. See app/app.py for how the app itself uses this.
 appUrlPrefix: "/staging"
 
-# staging gets its own port since it now lives on the same server and
-# the same public IP as dev and production. nodePort has to match this
-# exactly, since that's the fixed port the ALB's staging Target Group
-# in cloudformation/loadbalancer-stack.yaml was pointed at.
-service:
-  port: 5001
-  nodePort: 5001
+# Added in v10, the direct equivalent of the old StagingListenerRule's
+# Priority: 20 in cloudformation/loadbalancer-stack.yaml (v9).
+ingress:
+  groupOrder: "20"
+
+# Removed in v10: the service.port/nodePort override this file used to
+# carry (port: 5001, matching the old CloudFormation staging Target
+# Group) is gone entirely. staging now shares the exact same port as
+# every other environment - see values.yaml for the full reasoning.
 
 # This only ever gets updated by promote.yml, when a tag already
 # confirmed working in dev is promoted here through a reviewed pull

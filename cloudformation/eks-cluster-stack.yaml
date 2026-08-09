@@ -1,0 +1,303 @@
+# The second of four stacks, and the biggest conceptual jump this
+# project has made since v6 introduced ArgoCD. This one replaces both
+# compute-stack.yaml and loadbalancer-stack.yaml from v9 - there's no
+# hand-built EC2 instance or hand-built ALB left in this project at all.
+#
+# What this stack actually creates:
+#   - The EKS control plane itself (managed entirely by AWS - no EC2
+#     instance for it exists in this account, or any account we can see)
+#   - One EKS Managed Node Group (still real EC2 under the hood, but AWS
+#     handles the AMI, the bootstrap script, and the Auto Scaling Group -
+#     nothing here is SSH'd into or configured by Ansible anymore)
+#   - An IAM OIDC Identity Provider tied to this cluster's own issuer -
+#     the prerequisite every IRSA role in iam-irsa-stack.yaml depends on
+#   - An EKS Access Entry granting the GitHub Actions role cluster-admin
+#     - the modern replacement for hand-editing the aws-auth ConfigMap
+#
+# What's deliberately NOT here: no ALB, no Target Group, no Listener
+# Rule. Once the AWS Load Balancer Controller is installed (via Helm, in
+# infra.yml) and the app's Helm chart defines an Ingress resource, AWS
+# itself builds and manages the ALB automatically from those two things
+# alone. Nothing in this repo describes the load balancer directly
+# anymore - see helm/devops-pipeline/templates/ingress.yaml for what
+# replaces loadbalancer-stack.yaml's job instead.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  devops-cicd-pipeline - EKS cluster layer (control plane, managed node
+  group, OIDC provider, and an access entry for GitHub Actions). Depends
+  on the network stack's exported VPC and two subnets.
+
+Parameters:
+  EksClusterName:
+    Type: String
+    Default: devops-pipeline-eks
+    Description: >
+      Must match the same value passed into network-stack.yaml's
+      EksClusterName parameter - see that file for why the subnet tags
+      depend on this being identical.
+
+  MyIp:
+    Type: String
+    Description: >
+      Your own public IP address in CIDR form (e.g. 203.0.113.4/32).
+      Used to restrict the EKS API server's public endpoint, the same
+      "only me" rule every version since v5.1 has applied to SSH and the
+      k3s API - the only real difference is that here it's enforced by
+      EKS's own PublicAccessCidrs setting rather than a security group
+      rule, since the API server itself isn't something we own an EC2
+      instance for anymore.
+
+  GithubActionsRoleArn:
+    Type: String
+    Description: >
+      ARN of the github-actions-eks-role, created by hand outside this
+      stack (same pattern as every OIDC role since v9's
+      github-actions-cloudformation-role) - passed in here so it can be
+      granted cluster-admin through an Access Entry below, without this
+      stack needing to know anything about how that role's trust policy
+      is configured.
+
+  OidcProviderThumbprint:
+    Type: String
+    Description: >
+      SHA1 thumbprint of the OIDC provider's TLS certificate, required
+      by AWS::IAM::OIDCProvider even though EKS's own issuer doesn't
+      actually need certificate validation the way a real third-party
+      identity provider would. This has to be computed fresh, not
+      hardcoded, since AWS's own certificate chain has rotated before -
+      infra.yml computes this with openssl right before deploying this
+      stack rather than baking in a value here that could silently go
+      stale. See infra.yml for the exact command.
+
+Resources:
+  # The IAM identity the EKS control plane itself assumes to manage
+  # things on our behalf - creating ENIs in our subnets, tagging
+  # resources, and so on. This is a control-plane concern, entirely
+  # separate from NodeGroupRole below, which is what the worker EC2
+  # instances themselves assume.
+  EksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: devops-cicd-pipeline-eks-cluster-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  # The control plane itself. AWS provisions and runs api-server, etcd,
+  # the scheduler, and the controller-manager somewhere entirely outside
+  # this account - nothing here is an EC2 instance we can see or SSH
+  # into, which is the whole point of moving to EKS.
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref EksClusterName
+      Version: "1.31"
+      RoleArn: !GetAtt EksClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !ImportValue devops-pipeline-public-subnet-id
+          - !ImportValue devops-pipeline-public-subnet-two-id
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: false
+        # Mirrors the "only my own IP" rule every version since v5.1 has
+        # applied to SSH and the k3s API - the difference from a
+        # security group rule is that this is enforced by EKS itself at
+        # the API server level, since there's no EC2 instance of our own
+        # in front of it to attach a security group to.
+        PublicAccessCidrs:
+          - !Ref MyIp
+      # Access Entries are the modern replacement for the aws-auth
+      # ConfigMap - see the EksClusterAccessEntry resource below for the
+      # actual grant. Setting this to API means this cluster relies
+      # entirely on Access Entries for authorization, with no fallback
+      # to the ConfigMap-based system at all, which is what AWS itself
+      # recommends for any cluster built from scratch today.
+      AccessConfig:
+        AuthenticationMode: API
+      # Every log type EKS offers, shipped straight to CloudWatch Logs.
+      # This is the only way to see anything about the control plane at
+      # all - unlike k3s, where the control plane was just a process on
+      # our own EC2 instance that Alloy could scrape logs from directly,
+      # here it runs entirely outside our account. api and audit are the
+      # two that matter most for understanding who did what against the
+      # cluster; the rest come along for completeness at effectively no
+      # extra cost.
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-eks
+
+  # Grants the GitHub Actions role full admin rights over the cluster it
+  # just created - the same "whoever builds it can also manage it"
+  # relationship that's existed since v5.1, just expressed through an
+  # Access Entry instead of an SSH key or a kubeconfig secret.
+  EksClusterAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !Ref GithubActionsRoleArn
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+
+  # The prerequisite every IRSA role in iam-irsa-stack.yaml depends on.
+  # Without this, no ServiceAccount in the cluster (Loki's, the Load
+  # Balancer Controller's, Grafana's) can ever assume an IAM role -
+  # IRSA's entire mechanism is built on AWS trusting this specific
+  # OIDC issuer to vouch for identities inside the cluster.
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - !Ref OidcProviderThumbprint
+
+  # The IAM identity every node in the managed node group assumes. Three
+  # AWS-managed policies cover exactly what a worker node needs to
+  # function as part of the cluster: joining it, pulling images from
+  # ECR/ghcr-adjacent registries, and configuring its own pod networking
+  # through the VPC CNI plugin.
+  NodeGroupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: devops-cicd-pipeline-eks-nodegroup-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  # The actual worker capacity - still real EC2 instances underneath,
+  # but AWS picks the AMI, runs the bootstrap script that joins the node
+  # to the cluster, and manages the Auto Scaling Group behind it. One
+  # node, t3.large, matching the size used since v8 - the point of this
+  # version is demonstrating EKS itself, not multi-node app HA, and one
+  # node is enough for every workload already running (the app, Loki,
+  # Alloy, kube-prometheus-stack, ArgoCD, the Load Balancer Controller).
+  # A Managed Node Group has no direct "SecurityGroups" property of its
+  # own in CloudFormation - the only way to attach a custom security
+  # group to its EC2 instances is through a LaunchTemplate. This one
+  # only adds Grafana's NodePort rule; everything else about the nodes
+  # (AMI, bootstrap, ASG behavior) is left for EKS to resolve
+  # automatically, the same as if no LaunchTemplate had been specified
+  # at all.
+  GrafanaNodePortSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: devops-pipeline-grafana-nodeport-sg
+      GroupDescription: >-
+        Allows Grafana's NodePort (5010) through to the worker node,
+        restricted to my own IP - the same "only me" rule every version
+        since v5.1 has applied to Grafana, just expressed as its own
+        security group now instead of an inline rule on a hand-built
+        EC2 security group.
+      VpcId: !ImportValue devops-pipeline-vpc-id
+      SecurityGroupIngress:
+        - Description: Grafana UI (NodePort), only from my own machine
+          IpProtocol: tcp
+          FromPort: 5010
+          ToPort: 5010
+          CidrIp: !Ref MyIp
+      Tags:
+        - Key: Name
+          Value: devops-pipeline-grafana-nodeport-sg
+
+  # Attached to the node group below via its LaunchTemplate property.
+  # Deliberately does NOT set an ImageId or InstanceType here - both
+  # stay controlled by the Nodegroup resource itself (AmiType,
+  # InstanceTypes), so this template's only real job is adding the
+  # Grafana security group alongside the cluster's own automatically
+  # created one (EksCluster.ClusterSecurityGroupId), which every node
+  # needs regardless in order to actually talk to the control plane.
+  NodeGroupLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: devops-pipeline-nodegroup-lt
+      LaunchTemplateData:
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            Groups:
+              - !GetAtt EksCluster.ClusterSecurityGroupId
+              - !Ref GrafanaNodePortSecurityGroup
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: devops-pipeline-eks-node
+
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EksCluster
+      NodegroupName: devops-pipeline-nodegroup
+      NodeRole: !GetAtt NodeGroupRole.Arn
+      Subnets:
+        - !ImportValue devops-pipeline-public-subnet-id
+      LaunchTemplate:
+        Id: !Ref NodeGroupLaunchTemplate
+        Version: !GetAtt NodeGroupLaunchTemplate.LatestVersionNumber
+      InstanceTypes:
+        - t3.large
+      AmiType: AL2023_x86_64_STANDARD
+      DiskSize: 30
+      ScalingConfig:
+        MinSize: 1
+        MaxSize: 1
+        DesiredSize: 1
+      Tags:
+        Name: devops-pipeline-eks-node
+
+# Picked up by iam-irsa-stack.yaml (the OIDC provider ARN and cluster
+# name), by infra.yml (the cluster name, to run `aws eks
+# update-kubeconfig`), and by the Helm installs for anything that needs
+# to know the cluster's own identity.
+Outputs:
+  ClusterName:
+    Description: Name of the EKS cluster
+    Value: !Ref EksCluster
+    Export:
+      Name: devops-pipeline-eks-cluster-name
+
+  ClusterEndpoint:
+    Description: API server endpoint of the EKS cluster
+    Value: !GetAtt EksCluster.Endpoint
+    Export:
+      Name: devops-pipeline-eks-cluster-endpoint
+
+  OidcProviderArn:
+    Description: ARN of the OIDC provider, needed by every IRSA role's trust policy
+    Value: !Ref EksOidcProvider
+    Export:
+      Name: devops-pipeline-eks-oidc-provider-arn
+
+  OidcProviderUrl:
+    Description: >
+      Issuer URL of the OIDC provider, without the leading https:// -
+      needed in IRSA trust policies' Condition block, which references
+      it by hostname/path only, not as a full URL.
+    Value: !Select [1, !Split ["https://", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+    Export:
+      Name: devops-pipeline-eks-oidc-provider-url

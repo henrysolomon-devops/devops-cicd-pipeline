@@ -1,15 +1,21 @@
-name: Infrastructure (CloudFormation + Ansible)
+name: Infrastructure (CloudFormation + EKS)
 
-# This one's manual on purpose - it touches real AWS money, so it
-# should never fire on its own just because someone pushed to main.
-# I run it by hand, pick apply or destroy, and approve it myself
-# through the aws-infra environment before anything actually happens.
+# Still manual, still gated behind the aws-infra environment - this
+# touches real AWS money and a real cluster, so it never fires on its
+# own just because someone pushed to main.
 #
-# Rewritten in v9 to use CloudFormation instead of Terraform - see
-# cloudformation/ for the three stacks this now deploys, in place of
-# what used to live in terraform/. Everything below Ansible (namespaces,
-# monitoring, ArgoCD) is untouched, since none of that ever cared which
-# tool provisioned the server underneath it.
+# Rewritten in v10 for the move to EKS. The biggest structural change
+# from v9: there's no Ansible step anywhere in this file anymore. k3s
+# needed Ansible because Terraform (and then CloudFormation) only ever
+# built a bare EC2 instance - something still had to SSH in afterward
+# and actually install Kubernetes. EKS Managed Node Groups don't have
+# that gap: AWS resolves the AMI, runs the bootstrap script, and joins
+# the node to the cluster automatically, all as part of the
+# `aws cloudformation deploy` call itself. There's also no SSH key
+# anywhere in this workflow anymore, and no temporary security-group
+# hole opened for this runner's IP - administrative access to the
+# cluster now comes entirely from IAM, through the EKS Access Entry
+# created in cloudformation/eks-cluster-stack.yaml.
 on:
   workflow_dispatch:
     inputs:
@@ -33,6 +39,10 @@ concurrency:
   group: infra
   cancel-in-progress: false
 
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: devops-pipeline-eks
+
 jobs:
   infra:
     runs-on: ubuntu-latest
@@ -42,42 +52,37 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@v4
 
-      # TEMPORARY - added only to diagnose the AssumeRoleWithWebIdentity
-      # failure. Prints the actual sub/aud claims GitHub is sending, so
-      # they can be compared directly against the trust policy instead
-      # of guessing. Remove this step once the role is confirmed working.
-      - name: DEBUG - show the real OIDC token claims
-        run: |
-          IDTOKEN=$(curl -sSL -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
-          python3 -c "
-          import base64, json, sys
-          token = sys.argv[1]
-          payload = token.split('.')[1]
-          padded = payload + '=' * (-len(payload) % 4)
-          print(json.dumps(json.loads(base64.urlsafe_b64decode(padded)), indent=2))
-          " "$IDTOKEN"
-
-      # This role is new in v9 and deliberately separate from the old
-      # github-actions-terraform-role - that one is left completely
-      # alone so any earlier tag (v5.1 through v8.1) can still be
-      # checked out and applied on its own, without this workflow's
-      # changes affecting it. See the account setup notes for exactly
-      # what this role needs.
+      # New in v10, deliberately separate from v9's
+      # github-actions-cloudformation-role - that role is left
+      # completely alone so the v9.0.0 tag can still be checked out and
+      # applied entirely on its own, without anything in this workflow
+      # affecting it.
       - name: Get temporary AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::578254188866:role/github-actions-cloudformation-role
-          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::578254188866:role/github-actions-eks-role
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install Ansible
+      - name: Work out this account's ID and this role's own ARN
+        id: account
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+          # Built directly from the account ID and the role's fixed
+          # name, rather than read back from `aws sts get-caller-identity
+          # --query Arn` - that command returns an STS assumed-role
+          # session ARN (arn:aws:sts::...:assumed-role/...), not the
+          # actual IAM role ARN the EKS Access Entry in
+          # eks-cluster-stack.yaml needs as its PrincipalArn.
+          echo "eks_role_arn=arn:aws:iam::${ACCOUNT_ID}:role/github-actions-eks-role" >> "$GITHUB_OUTPUT"
+
+      - name: Install kubectl
         if: inputs.action == 'apply'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ansible
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
-      # New in v8 - needed to install kube-prometheus-stack below. Same
-      # install method used back in v3 for local Helm usage.
       - name: Install Helm
         if: inputs.action == 'apply'
         run: |
@@ -88,107 +93,97 @@ jobs:
 
       # ---------- apply path ----------
 
-      # First of three stacks. No CAPABILITY_NAMED_IAM needed here -
-      # this one only creates a VPC, subnets, and routing, nothing that
-      # touches IAM.
+      # First of four stacks, unchanged in spirit from v9 - just the two
+      # EKS-discovery tags added to both subnets now (see
+      # network-stack.yaml itself for why). No CAPABILITY_NAMED_IAM
+      # needed, same as before - still just a VPC, subnets, and routing.
       - name: Deploy the network stack
         if: inputs.action == 'apply'
         run: |
           aws cloudformation deploy \
             --template-file cloudformation/network-stack.yaml \
-            --stack-name devops-pipeline-network
+            --stack-name devops-pipeline-network \
+            --parameter-overrides \
+              EksClusterName="${{ env.EKS_CLUSTER_NAME }}"
 
-      # Second stack. CAPABILITY_NAMED_IAM is required here specifically
-      # because this template creates an IAM Role and Instance Profile
-      # (for Loki's S3 access) with names it chooses itself, rather than
-      # letting CloudFormation generate them - acknowledging that is
-      # what the capability flag is actually for.
-      - name: Deploy the compute stack
+      # The OIDC provider's certificate thumbprint has to be computed
+      # fresh rather than hardcoded (see eks-cluster-stack.yaml's own
+      # parameter description for why), but it doesn't actually need
+      # the cluster to exist yet - it's the thumbprint of the regional
+      # oidc.eks.<region>.amazonaws.com endpoint's own TLS certificate
+      # chain, which is identical for every EKS cluster in this region,
+      # not something specific to this cluster's own issuer path. That's
+      # what makes it safe to compute this before the cluster stack
+      # below even runs.
+      - name: Compute the EKS OIDC provider's certificate thumbprint
+        if: inputs.action == 'apply'
+        id: thumbprint
+        run: |
+          THUMBPRINT=$(echo | openssl s_client -servername "oidc.eks.${{ env.AWS_REGION }}.amazonaws.com" \
+            -connect "oidc.eks.${{ env.AWS_REGION }}.amazonaws.com:443" -showcerts 2>/dev/null \
+            | openssl x509 -in /dev/stdin -fingerprint -sha1 -noout \
+            | sed 's/^.*Fingerprint=//' | tr -d ':')
+          echo "value=$THUMBPRINT" >> "$GITHUB_OUTPUT"
+
+      # Second stack, and the biggest one - the EKS control plane
+      # itself, its Managed Node Group, the OIDC provider every IRSA
+      # role depends on, and the Access Entry that makes this same
+      # role a cluster admin. CAPABILITY_NAMED_IAM is required since
+      # this template creates two IAM roles with names it chooses
+      # itself (EksClusterRole, NodeGroupRole).
+      - name: Deploy the EKS cluster stack
         if: inputs.action == 'apply'
         run: |
           aws cloudformation deploy \
-            --template-file cloudformation/compute-stack.yaml \
-            --stack-name devops-pipeline-compute \
+            --template-file cloudformation/eks-cluster-stack.yaml \
+            --stack-name devops-pipeline-eks \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              MyIp="${{ vars.MY_IP }}"
+              EksClusterName="${{ env.EKS_CLUSTER_NAME }}" \
+              MyIp="${{ vars.MY_IP }}" \
+              GithubActionsRoleArn="${{ steps.account.outputs.eks_role_arn }}" \
+              OidcProviderThumbprint="${{ steps.thumbprint.outputs.value }}"
 
-      # Third and last stack. No IAM resources here either, so no
-      # capability flag needed - just the ALB, its security group, the
-      # target groups, and the listener rules.
-      - name: Deploy the load balancer stack
+      - name: Read the OIDC provider's issuer URL back out of the cluster stack
+        if: inputs.action == 'apply'
+        id: oidc
+        run: |
+          OIDC_URL=$(aws cloudformation describe-stacks \
+            --stack-name devops-pipeline-eks \
+            --query "Stacks[0].Outputs[?OutputKey=='OidcProviderUrl'].OutputValue" \
+            --output text)
+          echo "url=$OIDC_URL" >> "$GITHUB_OUTPUT"
+
+      # Third stack - the three IRSA roles (Loki, the AWS Load Balancer
+      # Controller, Grafana). CAPABILITY_NAMED_IAM again, for the same
+      # reason as the cluster stack: three named IAM roles, plus the
+      # standalone managed policy the Load Balancer Controller's role
+      # attaches.
+      - name: Deploy the IRSA stack
         if: inputs.action == 'apply'
         run: |
           aws cloudformation deploy \
-            --template-file cloudformation/loadbalancer-stack.yaml \
-            --stack-name devops-pipeline-loadbalancer
+            --template-file cloudformation/iam-irsa-stack.yaml \
+            --stack-name devops-pipeline-irsa \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              OidcProviderUrl="${{ steps.oidc.outputs.url }}"
 
-      # Added in v9, replacing the GitHub repo Variables that used to
-      # hold this in the Terraform version - now that everything is
-      # already living inside AWS, it makes more sense for these
-      # operational values to live there too, in SSM Parameter Store,
-      # rather than round-tripping through a GitHub API call.
-      - name: Write server IP and ALB DNS name to SSM Parameter Store
+      # Writes a real kubeconfig to the same path every later step in
+      # this file already assumes (~/.kube/devops-pipeline-config) -
+      # nothing below this step had to change just because the
+      # mechanism for getting cluster access changed from an SSH-copied
+      # k3s kubeconfig to this. Access itself comes from this role's own
+      # IAM identity, authorized by the Access Entry created in the
+      # cluster stack above - no kubeconfig secret, no certificate to
+      # manage by hand.
+      - name: Write a kubeconfig for the new cluster
         if: inputs.action == 'apply'
         run: |
-          SERVER_IP=$(aws cloudformation describe-stacks \
-            --stack-name devops-pipeline-compute \
-            --query "Stacks[0].Outputs[?OutputKey=='ServerPublicIp'].OutputValue" \
-            --output text)
-          ALB_DNS=$(aws cloudformation describe-stacks \
-            --stack-name devops-pipeline-loadbalancer \
-            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDnsName'].OutputValue" \
-            --output text)
-          aws ssm put-parameter --name "/devops-pipeline/server-public-ip" \
-            --value "$SERVER_IP" --type String --overwrite
-          aws ssm put-parameter --name "/devops-pipeline/alb-dns-name" \
-            --value "$ALB_DNS" --type String --overwrite
-
-      - name: Look up the security group this run needs to touch
-        if: inputs.action == 'apply'
-        id: app_sg
-        run: |
-          SG_ID=$(aws cloudformation describe-stacks \
-            --stack-name devops-pipeline-compute \
-            --query "Stacks[0].Outputs[?OutputKey=='AppServerSecurityGroupId'].OutputValue" \
-            --output text)
-          echo "id=$SG_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Figure out this runner's own public IP
-        if: inputs.action == 'apply'
-        id: runner_ip
-        run: echo "cidr=$(curl -s ifconfig.me)/32" >> "$GITHUB_OUTPUT"
-
-      - name: Temporarily let this runner SSH into the app server, just long enough for Ansible
-        if: inputs.action == 'apply'
-        run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ steps.app_sg.outputs.id }} \
-            --protocol tcp --port 22 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }}
-
-      - name: Temporarily let this runner reach the k3s API too
-        if: inputs.action == 'apply'
-        run: |
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ steps.app_sg.outputs.id }} \
-            --protocol tcp --port 6443 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }}
-
-      - name: Write out the SSH private key so Ansible can use it
-        if: inputs.action == 'apply'
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/devops-pipeline-key
-          chmod 600 ~/.ssh/devops-pipeline-key
-
-      # Reads the server IP from SSM itself now (see deploy-k3s.sh),
-      # rather than being handed it directly - nothing about how this
-      # step is called had to change.
-      - name: Run the Ansible playbook to install k3s
-        if: inputs.action == 'apply'
-        working-directory: ansible
-        run: ./deploy-k3s.sh
+          aws eks update-kubeconfig \
+            --name "${{ env.EKS_CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --kubeconfig ~/.kube/devops-pipeline-config
 
       - name: Create the three environment namespaces
         if: inputs.action == 'apply'
@@ -198,23 +193,67 @@ jobs:
           kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
 
-      # New in v8. Installed before ArgoCD on purpose: this chart brings
-      # in the ServiceMonitor CRD, and the app's own Helm chart (which
-      # ArgoCD is about to sync) includes a ServiceMonitor resource -
-      # if ArgoCD tried to sync that before the CRD exists, the sync
-      # would just fail.
+      # New in v10. Installed early, before kube-prometheus-stack and
+      # well before ArgoCD, since the app chart's own Ingress
+      # (helm/devops-pipeline/templates/ingress.yaml) needs this
+      # controller already watching the cluster before ArgoCD ever
+      # syncs it - the same CRD/controller-before-consumer ordering
+      # reason the ServiceMonitor CRD had to exist before ArgoCD synced
+      # back in v8.
+      - name: Add the eks-charts Helm repo and install its CRDs
+        if: inputs.action == 'apply'
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+          kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
+
+      - name: Get the VPC ID and the Load Balancer Controller's IRSA role ARN
+        if: inputs.action == 'apply'
+        id: alb
+        run: |
+          VPC_ID=$(aws cloudformation describe-stacks \
+            --stack-name devops-pipeline-network \
+            --query "Stacks[0].Outputs[?OutputKey=='VpcId'].OutputValue" \
+            --output text)
+          ROLE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name devops-pipeline-irsa \
+            --query "Stacks[0].Outputs[?OutputKey=='AwsLoadBalancerControllerIrsaRoleArn'].OutputValue" \
+            --output text)
+          echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
+          echo "role_arn=$ROLE_ARN" >> "$GITHUB_OUTPUT"
+
+      # region and vpcId are passed explicitly rather than left for the
+      # controller to auto-discover - auto-discovery needs a couple of
+      # extra EC2 describe permissions and a specific set of instance
+      # metadata tags to work reliably, and since this workflow already
+      # knows both values exactly, there's no reason to lean on
+      # discovery instead of just stating them.
+      - name: Install the AWS Load Balancer Controller
+        if: inputs.action == 'apply'
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            --version 3.5.0 \
+            --namespace kube-system \
+            --set clusterName="${{ env.EKS_CLUSTER_NAME }}" \
+            --set region="${{ env.AWS_REGION }}" \
+            --set vpcId="${{ steps.alb.outputs.vpc_id }}" \
+            --set serviceAccount.create=true \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${{ steps.alb.outputs.role_arn }}" \
+            --wait --timeout 5m
+
       - name: Add the prometheus-community Helm repo
         if: inputs.action == 'apply'
         run: |
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo update
 
-      # New in v8.1: renders the real Slack webhook URLs into a throwaway copy
-      # of monitoring/alertmanager-config.yaml, right here on the runner's own
-      # disk, replacing the __SLACK_WEBHOOK_INFRA__/__SLACK_WEBHOOK_APP__
-      # placeholders that are all that's ever committed to Git. This rendered
-      # file only ever exists for the lifetime of this job and is never logged,
-      # committed, or uploaded as an artifact.
+      # Renders the real Slack webhook URLs into a throwaway copy of
+      # monitoring/alertmanager-config.yaml, unchanged in spirit since
+      # v8.1 - only ever exists for the lifetime of this job, never
+      # logged, committed, or uploaded as an artifact.
       - name: Render the Alertmanager Slack webhook config
         if: inputs.action == 'apply'
         run: |
@@ -223,6 +262,19 @@ jobs:
             -e "s|__SLACK_WEBHOOK_APP__|${{ secrets.SLACK_WEBHOOK_APP }}|" \
             monitoring/alertmanager-config.yaml > monitoring/alertmanager-config.rendered.yaml
 
+      # New in v10: the same rendering approach as the Slack webhooks
+      # above, applied to monitoring/values.yaml itself now, since
+      # Grafana's serviceAccount annotation carries an IRSA role ARN
+      # with a __AWS_ACCOUNT_ID__ placeholder in the committed file (see
+      # that file's own comments for why the account ID is the only
+      # unknown part of an otherwise fully predictable ARN).
+      - name: Render the account ID into the kube-prometheus-stack values
+        if: inputs.action == 'apply'
+        run: |
+          sed \
+            -e "s|__AWS_ACCOUNT_ID__|${{ steps.account.outputs.id }}|" \
+            monitoring/values.yaml > monitoring/values.rendered.yaml
+
       - name: Install kube-prometheus-stack (Prometheus + Grafana + Alertmanager)
         if: inputs.action == 'apply'
         run: |
@@ -230,28 +282,32 @@ jobs:
           helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
             --version 88.1.5 \
             --namespace monitoring --create-namespace \
-            -f monitoring/values.yaml \
+            -f monitoring/values.rendered.yaml \
             -f monitoring/alertmanager-config.rendered.yaml \
             --wait --timeout 10m
 
-      # New in v8.1. Applied right after kube-prometheus-stack, since that's
-      # what installs the PrometheusRule CRD this file depends on - same
-      # ordering reason the ServiceMonitor CRD had to come before ArgoCD back
-      # in v8.
       - name: Apply the infra-level alerting rules
         if: inputs.action == 'apply'
         run: |
           export KUBECONFIG=~/.kube/devops-pipeline-config
           kubectl apply -f monitoring/prometheusrule-infra.yaml
 
-      # New in v8.1: Loki (log storage) and Alloy (the collector that actually
-      # reads Pod logs and ships them to Loki). Installed from the grafana Helm
-      # repo, into the same monitoring namespace as Prometheus and Grafana.
       - name: Add the grafana Helm repo
         if: inputs.action == 'apply'
         run: |
           helm repo add grafana https://grafana.github.io/helm-charts
           helm repo update
+
+      # Same __AWS_ACCOUNT_ID__ substitution as monitoring/values.yaml
+      # above, this time for Loki's own serviceAccount annotation - see
+      # monitoring/loki-values.yaml's comments for the full reasoning on
+      # why IRSA replaces the old IAM Instance Profile here.
+      - name: Render the account ID into the Loki values
+        if: inputs.action == 'apply'
+        run: |
+          sed \
+            -e "s|__AWS_ACCOUNT_ID__|${{ steps.account.outputs.id }}|" \
+            monitoring/loki-values.yaml > monitoring/loki-values.rendered.yaml
 
       - name: Install Loki
         if: inputs.action == 'apply'
@@ -260,7 +316,7 @@ jobs:
           helm upgrade --install loki grafana/loki \
             --version 6.27.0 \
             --namespace monitoring --create-namespace \
-            -f monitoring/loki-values.yaml \
+            -f monitoring/loki-values.rendered.yaml \
             --wait --timeout 10m
 
       - name: Install Grafana Alloy
@@ -273,11 +329,6 @@ jobs:
             -f monitoring/alloy-values.yaml \
             --wait --timeout 10m
 
-      # Restored from v6, unchanged in spirit from before Jenkins
-      # replaced it in v7: create the argocd namespace, install ArgoCD
-      # itself pinned to a fixed version so every build behaves
-      # identically, wait for its two core Deployments to actually be
-      # ready, then register the three per-environment Applications.
       - name: Create the argocd namespace
         if: inputs.action == 'apply'
         run: |
@@ -290,9 +341,6 @@ jobs:
           export KUBECONFIG=~/.kube/devops-pipeline-config
           kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.2/manifests/install.yaml
 
-      # ArgoCD's own components take a little while to come up after being
-      # applied, so this waits until they're actually ready instead of just
-      # assuming they are and moving on to whatever step comes next.
       - name: Wait for ArgoCD to come up
         if: inputs.action == 'apply'
         run: |
@@ -300,11 +348,6 @@ jobs:
           kubectl wait --for=condition=available --timeout=180s deployment/argocd-server -n argocd
           kubectl wait --for=condition=available --timeout=180s deployment/argocd-repo-server -n argocd
 
-      # These three manifests are what actually tell ArgoCD about our app -
-      # without this step, ArgoCD would be up and running but managing
-      # nothing at all. Same reasoning as the namespaces above: a fresh
-      # server has none of this registered yet, so it has to happen here
-      # every time, not just once by hand.
       - name: Register the three environment Applications with ArgoCD
         if: inputs.action == 'apply'
         run: |
@@ -313,49 +356,93 @@ jobs:
           kubectl apply -f argocd/staging-application.yaml
           kubectl apply -f argocd/production-application.yaml
 
-      # Worth noting: earlier versions of this workflow also saved
-      # SECURITY_GROUP_ID (as a repo variable) and KUBECONFIG_B64 (as a
-      # repo secret) here, using an admin PAT. Neither is restored -
-      # v9 goes a step further than v8 already did and moves the one
-      # value that's still genuinely needed (the security group ID)
-      # into a plain step output instead, and the operational values
-      # anything else might need (server IP, ALB DNS) now live in SSM
-      # Parameter Store, written above. No admin PAT is needed anywhere
-      # in this workflow anymore.
-      - name: Take the temporary SSH and API access back out
-        if: always() && inputs.action == 'apply'
+      # Only the cluster name goes to SSM Parameter Store here, not the
+      # ALB's DNS name the way the server's IP always was through v9.
+      # That's a deliberate choice, not an oversight: the ALB doesn't
+      # exist yet at this point in the workflow. It's created by the
+      # Load Balancer Controller in response to an Ingress resource
+      # that ArgoCD hasn't synced yet - ArgoCD's own sync is
+      # asynchronous and happens on its own schedule after this job
+      # finishes, so there's no reliable value to write here without
+      # adding a polling loop of uncertain length. Once the apply run
+      # finishes, the ALB's DNS name is one command away:
+      # `kubectl get ingress <name> -n dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'`
+      - name: Write the cluster name to SSM Parameter Store
+        if: inputs.action == 'apply'
         run: |
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ steps.app_sg.outputs.id }} \
-            --protocol tcp --port 22 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
-          aws ec2 revoke-security-group-ingress \
-            --group-id ${{ steps.app_sg.outputs.id }} \
-            --protocol tcp --port 6443 \
-            --cidr ${{ steps.runner_ip.outputs.cidr }} || true
+          aws ssm put-parameter --name "/devops-pipeline/eks-cluster-name" \
+            --value "${{ env.EKS_CLUSTER_NAME }}" --type String --overwrite
 
       # ---------- destroy path ----------
 
+      # Needed even for destroy - deleting the Ingress resources below
+      # requires cluster access, same as everything else in this file.
+      - name: Write a kubeconfig for the existing cluster
+        if: inputs.action == 'destroy'
+        run: |
+          aws eks update-kubeconfig \
+            --name "${{ env.EKS_CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --kubeconfig ~/.kube/devops-pipeline-config
+
+      # This is the step the whole destroy order depends on. The AWS
+      # Load Balancer Controller creates a real ALB, Target Groups, and
+      # ENIs directly in this project's VPC and subnets - none of that
+      # is CloudFormation's to know about or clean up. Deleting every
+      # Ingress here is what tells the controller to tear the ALB down
+      # on its own, before any CloudFormation stack starts deleting the
+      # VPC underneath it. Skipping this (or deleting the EKS stack
+      # first) would leave an orphaned ALB and ENIs still attached to
+      # the subnets, and network-stack's own delete would then fail
+      # with a dependency error.
+      - name: Delete every Ingress so the Load Balancer Controller tears down the ALB
+        if: inputs.action == 'destroy'
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          kubectl delete ingress --all --all-namespaces --ignore-not-found --timeout=60s || true
+
+      # The controller's own ALB deletion happens asynchronously in the
+      # background after the Ingress is gone, so this polls
+      # elbv2 directly rather than assuming it's already done the
+      # moment kubectl returns. Ten tries, ten seconds apart, is
+      # generous for a single ALB with three Target Groups - if it's
+      # still stuck at the end of this loop, the next stack delete will
+      # fail loudly and clearly rather than this step failing silently.
+      - name: Wait for the ALB itself to actually disappear
+        if: inputs.action == 'destroy'
+        run: |
+          for i in $(seq 1 10); do
+            COUNT=$(aws elbv2 describe-load-balancers \
+              --query "length(LoadBalancers[?contains(LoadBalancerName, 'k8s-devops')])" \
+              --output text 2>/dev/null || echo "0")
+            if [ "$COUNT" = "0" ]; then
+              echo "ALB is gone."
+              break
+            fi
+            echo "Still waiting on the ALB to be deleted (attempt $i/10)..."
+            sleep 10
+          done
+
       # Stacks come down in the exact reverse order they went up in.
-      # CloudFormation won't allow a stack to be deleted while another
-      # stack still has an active Fn::ImportValue reference to one of
-      # its Exports, so this order isn't just tidy - deleting out of
-      # order would fail outright.
-      - name: Delete the load balancer stack
+      # The IRSA stack has to go first, specifically because it imports
+      # the EKS cluster stack's OIDC provider ARN - CloudFormation won't
+      # allow deleting a stack while another stack still has an active
+      # Fn::ImportValue reference to one of its Exports.
+      - name: Delete the IRSA stack
         if: inputs.action == 'destroy'
-        run: aws cloudformation delete-stack --stack-name devops-pipeline-loadbalancer
+        run: aws cloudformation delete-stack --stack-name devops-pipeline-irsa
 
-      - name: Wait for the load balancer stack to finish deleting
+      - name: Wait for the IRSA stack to finish deleting
         if: inputs.action == 'destroy'
-        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-loadbalancer
+        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-irsa
 
-      - name: Delete the compute stack
+      - name: Delete the EKS cluster stack
         if: inputs.action == 'destroy'
-        run: aws cloudformation delete-stack --stack-name devops-pipeline-compute
+        run: aws cloudformation delete-stack --stack-name devops-pipeline-eks
 
-      - name: Wait for the compute stack to finish deleting
+      - name: Wait for the EKS cluster stack to finish deleting
         if: inputs.action == 'destroy'
-        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-compute
+        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-eks
 
       - name: Delete the network stack
         if: inputs.action == 'destroy'
