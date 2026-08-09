@@ -115,12 +115,27 @@ Resources:
           - !Ref MyIp
       # Access Entries are the modern replacement for the aws-auth
       # ConfigMap - see the EksClusterAccessEntry resource below for the
-      # actual grant. Setting this to API means this cluster relies
-      # entirely on Access Entries for authorization, with no fallback
-      # to the ConfigMap-based system at all, which is what AWS itself
-      # recommends for any cluster built from scratch today.
+      # actual grant. Setting authenticationMode to API means this
+      # cluster relies entirely on Access Entries for authorization,
+      # with no fallback to the ConfigMap-based system at all, which is
+      # what AWS itself recommends for any cluster built from scratch
+      # today.
+      #
+      # bootstrapClusterCreatorAdminPermissions is explicitly set to
+      # false here, which goes against AWS's own default (true). Left
+      # at the default, EKS silently grants the IAM principal that
+      # creates the cluster - the same GithubActionsRoleArn passed in
+      # below - an implicit, hidden Access Entry with cluster-admin
+      # rights, entirely outside this template's own visibility. That
+      # collided directly with the explicit EksClusterAccessEntry
+      # resource further down, which tries to grant that exact same
+      # principal the exact same thing and fails with "already in use."
+      # Disabling the implicit grant and keeping only the explicit one
+      # means every principal with cluster access is visible by reading
+      # this file, not partly hidden behind an AWS default.
       AccessConfig:
         AuthenticationMode: API
+        BootstrapClusterCreatorAdminPermissions: false
       # Every log type EKS offers, shipped straight to CloudWatch Logs.
       # This is the only way to see anything about the control plane at
       # all - unlike k3s, where the control plane was just a process on
