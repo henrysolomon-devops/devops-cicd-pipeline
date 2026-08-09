@@ -86,6 +86,21 @@ loki:
 # on and then never used.
 singleBinary:
   replicas: 1
+  # Disabled in v10. The chart requests a PersistentVolumeClaim for
+  # this Pod's local WAL/index cache by default, even though the real,
+  # durable backend is S3 - that PVC is just a performance buffer, not
+  # the source of truth. On k3s (through v9) that PVC bound instantly
+  # against the node's own local disk. EKS is different: as of 1.23,
+  # the in-tree EBS provisioner is gone and the EBS CSI driver isn't
+  # installed by default, so a fresh EKS cluster has no default
+  # StorageClass at all - the PVC just sits Pending forever, and
+  # `helm upgrade --wait` times out with "context deadline exceeded"
+  # since the Pod can never actually start. Disabling persistence here
+  # (falling back to an ephemeral emptyDir) is the same call already
+  # made for Redis in v8 - nothing this Pod caches locally is worth
+  # provisioning a whole EBS CSI driver addon to persist.
+  persistence:
+    enabled: false
   resources:
     requests:
       cpu: 100m
