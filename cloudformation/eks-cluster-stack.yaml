@@ -106,13 +106,24 @@ Resources:
           - !ImportValue devops-pipeline-public-subnet-two-id
         EndpointPublicAccess: true
         EndpointPrivateAccess: false
-        # Mirrors the "only my own IP" rule every version since v5.1 has
-        # applied to SSH and the k3s API - the difference from a
-        # security group rule is that this is enforced by EKS itself at
-        # the API server level, since there's no EC2 instance of our own
-        # in front of it to attach a security group to.
+        # Deliberately left open to every source, unlike the "only my
+        # own IP" rule every version since v5.1 has applied to SSH and
+        # the k3s API. That old rule made sense specifically because
+        # k3s's API had no strong authentication of its own beyond a
+        # static kubeconfig certificate - network-level restriction was
+        # the only real protection layer available. EKS is different:
+        # even with this endpoint fully public, a request still needs a
+        # valid AWS-signed identity that's actually been granted access
+        # through an Access Entry (see EksClusterAccessEntry below) to
+        # do anything at all - the real security boundary here is IAM,
+        # not the network. Restricting this to MyIp was tried first and
+        # broke two things at once: the GitHub Actions runner that runs
+        # every step of this workflow doesn't share Henry's own IP, and
+        # neither does AWS CloudShell, so both got a connection timeout
+        # trying to reach a cluster they were otherwise fully authorized
+        # to manage.
         PublicAccessCidrs:
-          - !Ref MyIp
+          - 0.0.0.0/0
       # Access Entries are the modern replacement for the aws-auth
       # ConfigMap - see the EksClusterAccessEntry resource below for the
       # actual grant. Setting authenticationMode to API means this
