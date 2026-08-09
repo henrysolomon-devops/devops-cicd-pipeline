@@ -30,7 +30,7 @@ ingress:
 # to read. deploy.yml's dev job overwrites this value automatically on
 # every build - there's no need to ever edit it by hand.
 image:
-  tag: "ddbfa4887b6fbf9a9e89fff2bb242d3f4ef05362"
+  tag: "9e2c82c7b92ffc4655fbd555d35f8e7cf8a662cc"
 
 # No service.port override needed here, or in any environment as of
 # v10 - see values.yaml for why all three environments can now safely
