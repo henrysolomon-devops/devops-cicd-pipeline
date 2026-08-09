@@ -30,4 +30,4 @@ ingress:
 # request - never edited by hand, and never touched directly by
 # deploy.yml the way values-dev.yaml is.
 image:
-  tag: "9e2c82c7b92ffc4655fbd555d35f8e7cf8a662cc"
+  tag: "58b3314de0361ca8b684721b7c0e23917fe0cb91"
