@@ -87,19 +87,19 @@ grafana:
       eks.amazonaws.com/role-arn: "arn:aws:iam::__AWS_ACCOUNT_ID__:role/devops-cicd-pipeline-grafana-cloudwatch-irsa-role"
 
   service:
-    # Unchanged in spirit from v9 - Grafana stays on a fixed NodePort,
-    # restricted to my own IP only, rather than being exposed through
-    # the ALB the way the app is. The security group enforcing that
-    # restriction moved in v10 from a rule on the hand-built EC2
-    # security group (cloudformation/compute-stack.yaml, now gone) to
-    # GrafanaNodePortSecurityGroup, attached to the EKS Managed Node
-    # Group's own EC2 instances through a LaunchTemplate - see
-    # cloudformation/eks-cluster-stack.yaml for why a LaunchTemplate is
-    # what's actually needed to attach a custom security group to a
-    # managed node group at all.
+    # Changed in v10. Through v9, k3s's own --service-node-port-range
+    # flag was widened by hand (ansible/install-k3s.yml) so a low,
+    # memorable port like 5010 was valid at all. EKS's control plane is
+    # fully managed by AWS - there's no way to pass a custom
+    # --service-node-port-range flag to it, so this has to move into
+    # Kubernetes' own standard NodePort range (30000-32767) instead.
+    # 30010 was picked purely to still echo the old 5010 for anyone
+    # who remembers it. The security group enforcing "my own IP only"
+    # (cloudformation/eks-cluster-stack.yaml's
+    # GrafanaNodePortSecurityGroup) moves to match this exact port.
     type: NodePort
     port: 3000
-    nodePort: 5010
+    nodePort: 30010
 
   sidecar:
     dashboards:

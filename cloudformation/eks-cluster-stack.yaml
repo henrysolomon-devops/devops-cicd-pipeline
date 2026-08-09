@@ -235,15 +235,15 @@ Resources:
     Properties:
       GroupName: devops-pipeline-grafana-nodeport-sg
       GroupDescription: >-
-        Allows Grafanas NodePort 5010 through to the worker node,
+        Allows Grafanas NodePort 30010 through to the worker node,
         restricted to my own IP only, same as SSH and the k3s API in
         every version since v5.1.
       VpcId: !ImportValue devops-pipeline-vpc-id
       SecurityGroupIngress:
-        - Description: Grafana UI (NodePort), only from my own machine
+        - Description: Grafana UI NodePort 30010, only from my own machine
           IpProtocol: tcp
-          FromPort: 5010
-          ToPort: 5010
+          FromPort: 30010
+          ToPort: 30010
           CidrIp: !Ref MyIp
       Tags:
         - Key: Name
