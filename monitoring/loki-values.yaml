@@ -96,11 +96,29 @@ singleBinary:
   # StorageClass at all - the PVC just sits Pending forever, and
   # `helm upgrade --wait` times out with "context deadline exceeded"
   # since the Pod can never actually start. Disabling persistence here
-  # (falling back to an ephemeral emptyDir) is the same call already
-  # made for Redis in v8 - nothing this Pod caches locally is worth
-  # provisioning a whole EBS CSI driver addon to persist.
+  # is the same call already made for Redis in v8 - nothing this Pod
+  # caches locally is worth provisioning a whole EBS CSI driver addon
+  # to persist.
   persistence:
     enabled: false
+  # Added right alongside persistence.enabled: false above, after
+  # discovering the first fix wasn't actually enough on its own.
+  # Disabling persistence only removes the PVC-backed volume the chart
+  # would otherwise mount at /var/loki - it doesn't provide any
+  # replacement. Combined with the loki container's own
+  # readOnlyRootFilesystem security setting, that left the container
+  # with nowhere to create its working directory at all, crashing
+  # immediately with "mkdir /var/loki: read-only file system". An
+  # explicit emptyDir at the exact same path is the standard fix here:
+  # Kubernetes doesn't care that the chart's own internal volume named
+  # "storage" no longer exists, only that something is mounted at
+  # /var/loki.
+  extraVolumes:
+    - name: loki-storage
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: loki-storage
+      mountPath: /var/loki
   resources:
     requests:
       cpu: 100m
