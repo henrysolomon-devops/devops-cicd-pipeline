@@ -1,8 +1,15 @@
 # DevOps CI/CD Pipeline
 
-A complete, end-to-end DevOps CI/CD pipeline built incrementally, one tool at a time. Each version adds exactly one new concept to an already-working system, starting from containerizing a simple app and working up to Kubernetes, Infrastructure as Code, GitOps, CI/CD, observability, and networking.
+A complete, end-to-end DevOps CI/CD pipeline built incrementally, one tool at a time. Each version adds exactly one new concept to an already-working system, starting from containerizing a simple app and working up to Kubernetes, Infrastructure as Code, GitOps, CI/CD, observability, networking, and managed Kubernetes on AWS.
 
 The goal isn't just to run the commands, but to understand why each tool is used. See [`PROJECT_PLAN.md`](./PROJECT_PLAN.md) for the full roadmap, conventions, and reasoning behind every decision. Each version below also has its own detailed guide under [`docs/`](./docs), covering setup, testing, and the reasoning behind that version specifically.
+
+**Looking for a specific tool rather than the latest version?** This repo has been through three different infrastructure tools, each with its own best, most-polished checkpoint:
+- **Terraform**: the `v8.1.0` tag is the last and most complete version built on Terraform, before v9 replaced it with CloudFormation.
+- **CloudFormation + a hand-built EC2/k3s server**: the `v9.0.0` tag - CloudFormation managing a single EC2 instance and a hand-written Application Load Balancer, before v10 moved onto EKS.
+- **CloudFormation + Amazon EKS**: `main` / the `v10.0.0` tag - the current and final version, with a managed Kubernetes control plane, IRSA, and the AWS Load Balancer Controller.
+
+Each tag is a fully working, independently tested checkpoint - none of them depend on anything from a later version.
 
 ## Roadmap
 
@@ -19,7 +26,7 @@ The goal isn't just to run the commands, but to understand why each tool is used
 | v8.0 | Prometheus + Grafana | Observability & monitoring | ✅ Done |
 | v8.1 | Loki + Grafana Alloy + Alertmanager | Log aggregation & alerting | ✅ Done |
 | v9.0 | Load Balancer + AWS CloudFormation | Networking, alternative IaC | ✅ Done |
-| v10.0 | Migrate to Amazon EKS | Managed Kubernetes, IRSA, AWS Load Balancer Controller | ⏳ Planned |
+| v10.0 | Migration to Amazon EKS | Managed Kubernetes, IRSA, AWS Load Balancer Controller | ✅ Done |
 
 ## Project structure
 
@@ -28,13 +35,14 @@ Each tool gets its own folder at the repo root, added as the version that introd
     devops-cicd-pipeline/
     ├── app/            # Application source code (v1, Redis + Open-Meteo + /metrics added in v8, APP_URL_PREFIX added in v9)
     ├── docker/         # Dockerfile + .dockerignore (v1)
-    ├── helm/           # Helm chart (v3, Redis/ServiceMonitor/dashboard templates added in v8, app-level alerting rules added in v8.1, NodePort + appUrlPrefix added in v9)
-    ├── .github/        # GitHub Actions workflows (v4, extended in v5.1, rewritten around CloudFormation in v9)
-    ├── cloudformation/ # Infrastructure as Code (v9, replaces terraform/ - recoverable from the v8.1.0 tag)
-    ├── ansible/        # Configuration management (v5)
+    ├── helm/           # Helm chart (v3, Redis/ServiceMonitor/dashboard templates added in v8, app-level alerting rules added in v8.1, NodePort + appUrlPrefix added in v9, Ingress + ClusterIP restored in v10)
+    ├── .github/        # GitHub Actions workflows (v4, extended in v5.1, rewritten around CloudFormation in v9, rewritten around EKS in v10)
+    ├── cloudformation/ # Infrastructure as Code (v9, EKS cluster + IRSA stacks replace the EC2/ALB stacks in v10 - recoverable from the v9.0.0 tag)
     ├── argocd/         # GitOps application definitions (v6, recovered in v8 after v7's detour)
-    ├── monitoring/     # Prometheus + Grafana config (v8, Loki/Alloy/Alertmanager config added in v8.1, Grafana NodePort added in v9)
+    ├── monitoring/     # Prometheus + Grafana config (v8, Loki/Alloy/Alertmanager config added in v8.1, Grafana NodePort added in v9, IRSA + CloudWatch datasource added in v10)
     └── docs/           # Detailed per-version guides (setup, testing, reasoning)
+
+`ansible/` and `terraform/`, used from v5 through v9, were removed entirely in v10 - EKS Managed Node Groups bootstrap themselves automatically, and CloudFormation had already replaced Terraform back in v9. Both remain fully recoverable from earlier tags.
 
 ## v1: Flask app + Docker + HTML dashboard
 
@@ -101,6 +109,12 @@ Adds log aggregation and alerting on top of v8's metrics-only observability stac
 Terraform is replaced entirely by three CloudFormation stacks (network, compute, load balancer), connected through cross-stack `Fn::ImportValue` references rather than Terraform's module system - a direct comparison between a multi-cloud IaC tool and AWS's own native one. An Application Load Balancer now sits in front of all three environments, routing by URL path (`/dev`, `/staging`, `/production`) instead of by port, which meant moving each environment's Service from `LoadBalancer` to `NodePort` with an explicitly pinned port so the ALB's Target Groups always know exactly where to reach it. The app itself gained an `APP_URL_PREFIX`, while `/health` and `/metrics` deliberately stayed unprefixed, since Kubernetes' probes and Prometheus' scraper both reach those directly, never through the ALB. The app port is no longer reachable from outside at all - the ALB is now the only way in.
 
 📄 [Full guide: setup, testing, and reasoning](./docs/v9-cloudformation-loadbalancer.md)
+
+## v10: Migration to Amazon EKS
+
+The single, manually-managed k3s server from v5 through v9 is replaced by Amazon EKS - a real, managed, multi-AZ Kubernetes control plane. Two CloudFormation stacks (`eks-cluster-stack.yaml`, `iam-irsa-stack.yaml`) replace the hand-built EC2 instance and ALB stacks from v9; `ansible/` is gone entirely, since EKS Managed Node Groups bootstrap themselves. IRSA replaces the IAM Instance Profile workaround Loki has used since v8.1, giving individual Pods (Loki, Grafana, the AWS Load Balancer Controller) their own scoped AWS identities instead of sharing one instance-wide identity. The hand-written ALB from v9 is replaced by a native Kubernetes `Ingress`, automatically turned into a real, shared ALB by the AWS Load Balancer Controller - the same "one address, three paths" model as before, now built and managed by AWS rather than by hand in CloudFormation. Grafana gained a CloudWatch datasource, used for exactly one thing: EKS's own control plane logs, which exist nowhere else since the control plane itself runs entirely outside this account's visibility.
+
+📄 [Full guide: setup, testing, and reasoning](./docs/v10-eks-migration.md)
 
 ## License
 
