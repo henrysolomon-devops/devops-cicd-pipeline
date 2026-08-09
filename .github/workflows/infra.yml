@@ -97,6 +97,24 @@ jobs:
       # EKS-discovery tags added to both subnets now (see
       # network-stack.yaml itself for why). No CAPABILITY_NAMED_IAM
       # needed, same as before - still just a VPC, subnets, and routing.
+      # aws cloudformation deploy refuses to update a stack stuck in
+      # ROLLBACK_COMPLETE (the state a stack lands in after its very
+      # first create attempt fails) - it has to be deleted first, then
+      # recreated from scratch. This check runs before every stack
+      # deploy below so a failed first attempt on any of the four
+      # stacks never needs a manual delete-stack run by hand before
+      # retrying.
+      - name: Clear the network stack if it's stuck in ROLLBACK_COMPLETE
+        if: inputs.action == 'apply'
+        run: |
+          STATUS=$(aws cloudformation describe-stacks --stack-name devops-pipeline-network \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "Stack is stuck in ROLLBACK_COMPLETE, deleting it before retrying."
+            aws cloudformation delete-stack --stack-name devops-pipeline-network
+            aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-network
+          fi
+
       - name: Deploy the network stack
         if: inputs.action == 'apply'
         run: |
@@ -131,6 +149,17 @@ jobs:
       # role a cluster admin. CAPABILITY_NAMED_IAM is required since
       # this template creates two IAM roles with names it chooses
       # itself (EksClusterRole, NodeGroupRole).
+      - name: Clear the EKS cluster stack if it's stuck in ROLLBACK_COMPLETE
+        if: inputs.action == 'apply'
+        run: |
+          STATUS=$(aws cloudformation describe-stacks --stack-name devops-pipeline-eks \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "Stack is stuck in ROLLBACK_COMPLETE, deleting it before retrying."
+            aws cloudformation delete-stack --stack-name devops-pipeline-eks
+            aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-eks
+          fi
+
       - name: Deploy the EKS cluster stack
         if: inputs.action == 'apply'
         run: |
@@ -159,6 +188,17 @@ jobs:
       # reason as the cluster stack: three named IAM roles, plus the
       # standalone managed policy the Load Balancer Controller's role
       # attaches.
+      - name: Clear the IRSA stack if it's stuck in ROLLBACK_COMPLETE
+        if: inputs.action == 'apply'
+        run: |
+          STATUS=$(aws cloudformation describe-stacks --stack-name devops-pipeline-irsa \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "Stack is stuck in ROLLBACK_COMPLETE, deleting it before retrying."
+            aws cloudformation delete-stack --stack-name devops-pipeline-irsa
+            aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-irsa
+          fi
+
       - name: Deploy the IRSA stack
         if: inputs.action == 'apply'
         run: |
@@ -243,6 +283,21 @@ jobs:
             --set serviceAccount.name=aws-load-balancer-controller \
             --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${{ steps.alb.outputs.role_arn }}" \
             --wait --timeout 5m
+
+      # The controller's own readiness probe passing (which the --wait
+      # flag above already confirmed) doesn't guarantee its self-signed
+      # webhook certificate has finished being generated and patched
+      # into the MutatingWebhookConfiguration yet - that happens as a
+      # separate internal startup step, not something the readiness
+      # probe waits on. Anything that creates a Service shortly after
+      # (kube-prometheus-stack's Grafana Service, right after this)
+      # gets routed through that webhook, and a request arriving before
+      # the certificate is actually in place fails with a TLS
+      # "signed by unknown authority" error - not a real permissions or
+      # config problem, just a timing gap this sleep closes.
+      - name: Give the Load Balancer Controller's webhook certificate time to settle
+        if: inputs.action == 'apply'
+        run: sleep 30
 
       - name: Add the prometheus-community Helm repo
         if: inputs.action == 'apply'
