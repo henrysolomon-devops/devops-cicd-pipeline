@@ -1,0 +1,78 @@
+# Added in v10, replacing everything cloudformation/loadbalancer-stack.yaml
+# used to do by hand in v9. Once the AWS Load Balancer Controller is
+# running in the cluster (installed via Helm in infra.yml), it watches
+# for Ingress resources like this one and builds/manages a real ALB,
+# Target Group, and Listener Rule from it automatically - nothing about
+# the load balancer itself is written by hand anymore.
+#
+# The three environments (dev, staging, production) each install this
+# chart as a separate Helm Release into their own namespace, which means
+# three separate Ingress resources get created - one per namespace, same
+# as before. Left on their own, that would normally mean three separate
+# ALBs, which isn't what we want; the whole point since v9 has been one
+# shared address routing by path. The alb.ingress.kubernetes.io/group.name
+# annotation below is what fixes that: any Ingress carrying the same
+# group name, anywhere in the cluster, gets merged into a single shared
+# ALB by the controller, with each Ingress contributing its own path
+# rule. group.order plays the same role Priority did on each
+# ListenerRule in the old CloudFormation file - it just controls which
+# rule gets evaluated first when paths could otherwise overlap, though
+# in practice /dev, /staging, and /production never actually overlap
+# with each other.
+#
+# One deliberate choice worth calling out: this uses the older
+# kubernetes.io/ingress.class annotation rather than the newer
+# spec.ingressClassName field backed by a real IngressClass resource.
+# An IngressClass is a cluster-scoped object, not a namespaced one - and
+# since three separate Helm Releases (one per environment) would all be
+# trying to own that same cluster-scoped resource, that path leads to
+# Helm ownership conflicts between releases for no real benefit here.
+# The annotation-based approach is still fully supported by the
+# controller and sidesteps that problem entirely.
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "devops-pipeline.fullname" . }}
+  labels:
+    {{- include "devops-pipeline.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/ingress.class: alb
+    # internet-facing + target-type ip together are the modern,
+    # recommended combination for EKS with the VPC CNI (which every
+    # node in this project's Managed Node Group runs by default): the
+    # ALB sends traffic directly to a Pod's own IP address inside the
+    # VPC, bypassing kube-proxy and NodePort entirely - the whole
+    # reason service.type could go back to plain ClusterIP in v10
+    # after v9 needed NodePort specifically to give the old
+    # instance-based Target Groups something fixed to register against.
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # Every environment's Ingress shares this same group name, which is
+    # what makes the controller merge all three into one ALB instead of
+    # building three separate ones - see the comment above this block
+    # for the full reasoning.
+    alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.groupName }}
+    alb.ingress.kubernetes.io/group.order: "{{ .Values.ingress.groupOrder }}"
+    # Deliberately unprefixed, matching the same reasoning that's held
+    # since v9: /health is what Kubernetes' own probes hit directly
+    # against the Pod, never through path-based routing, so the ALB's
+    # own health check should point at the exact same unprefixed path
+    # rather than something environment-specific.
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+spec:
+  rules:
+    - http:
+        paths:
+          # Prefix matching here behaves the same way the old
+          # ListenerRule's explicit /dev and /dev/* pair did - a request
+          # to exactly /dev, or anything under it, both match.
+          - path: {{ .Values.appUrlPrefix }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "devops-pipeline.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

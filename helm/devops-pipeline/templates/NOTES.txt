@@ -1,16 +1,21 @@
 1. Get the application URL:
-{{- if contains "NodePort" .Values.service.type }}
-  # Since v9, this app runs with service.type: NodePort on every
-  # environment - it's no longer reachable directly on its own port.
-  # The ALB (built in cloudformation/loadbalancer-stack.yaml) is the
-  # actual front door now, routing by URL path instead of by port.
+{{- if .Values.ingress.enabled }}
+  # Since v10, the ALB is built and managed automatically by the AWS
+  # Load Balancer Controller from the Ingress resource in
+  # templates/ingress.yaml - nothing about it is written by hand
+  # anymore (see cloudformation/loadbalancer-stack.yaml on the v9.0.0
+  # tag for how this used to work). infra.yml reads the ALB's DNS name
+  # straight off the Ingress's own status field after the Load
+  # Balancer Controller finishes provisioning it, and writes it to SSM
+  # Parameter Store the same way the server's IP already is.
   echo "Visit http://<alb-dns-name>{{ .Values.appUrlPrefix }} to use your application"
-  echo "(The ALB's DNS name is written to SSM Parameter Store by infra.yml after each deploy.)"
+  echo "(Find the ALB's DNS name with: kubectl get ingress {{ include "devops-pipeline.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
 {{- else if contains "LoadBalancer" .Values.service.type }}
   # k3s's built-in Klipper load balancer exposes this directly on the
   # server's own public IP, on this environment's own port, no
-  # port-forward needed. Kept here for reference - this was the model
-  # used from v5.1 through v8.1, before the ALB replaced it in v9.
+  # port-forward needed. Kept here purely for historical reference -
+  # this was the model used from v5.1 through v8.1, before the ALB
+  # replaced it in v9, and before EKS replaced k3s entirely in v10.
   echo "Visit http://<server-ip>:{{ .Values.service.port }} to use your application"
 {{- else if contains "ClusterIP" .Values.service.type }}
   export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "devops-pipeline.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
@@ -18,5 +23,5 @@
   echo "Visit http://127.0.0.1:8080 to use your application"
   kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
 {{- else }}
-  echo "This chart supports service.type: NodePort, LoadBalancer, or ClusterIP in this project."
+  echo "This chart supports an ALB Ingress (ingress.enabled: true), or falls back to service.type: LoadBalancer or ClusterIP for local/manual testing."
 {{- end }}

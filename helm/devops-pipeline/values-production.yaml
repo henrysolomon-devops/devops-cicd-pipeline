@@ -15,13 +15,15 @@ appEnv: "production"
 # address lands here. See app/app.py for how the app itself uses this.
 appUrlPrefix: "/production"
 
-# production gets its own port too, same reasoning as staging. nodePort
-# has to match this exactly, since that's the fixed port the ALB's
-# production Target Group in cloudformation/loadbalancer-stack.yaml
-# was pointed at.
-service:
-  port: 5002
-  nodePort: 5002
+# Added in v10, the direct equivalent of the old ProductionListenerRule's
+# Priority: 30 in cloudformation/loadbalancer-stack.yaml (v9).
+ingress:
+  groupOrder: "30"
+
+# Removed in v10: the service.port/nodePort override this file used to
+# carry (port: 5002, matching the old CloudFormation production Target
+# Group) is gone entirely. production now shares the exact same port as
+# every other environment - see values.yaml for the full reasoning.
 
 # Same story as staging - this only changes through promote.yml, once
 # a tag has already been confirmed working in staging and the

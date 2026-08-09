@@ -4,6 +4,24 @@
 # paths across many machines, which would just be unused complexity here.
 deploymentMode: SingleBinary
 
+# Changed in v10. Through v9, Loki picked up AWS credentials automatically
+# from the EC2 instance's IAM Instance Profile - every process on that box
+# shared the same identity, since k3s had no IRSA. Now that this runs on
+# EKS, Loki gets its own IAM identity through IRSA instead: the annotation
+# below tells EKS's built-in Pod Identity webhook to inject temporary,
+# Loki-specific AWS credentials into this Pod alone, scoped to exactly the
+# S3 permissions granted in cloudformation/iam-irsa-stack.yaml's
+# LokiIrsaRole - nothing else in the cluster, not even another Pod on the
+# same Node, can assume this role. __AWS_ACCOUNT_ID__ is substituted by
+# infra.yml at apply time, the same sed-based pattern already used for the
+# Slack webhook URLs in monitoring/alertmanager-config.yaml - the role name
+# itself is fixed, so the only unknown part of the ARN is the account ID.
+serviceAccount:
+  create: true
+  name: loki
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::__AWS_ACCOUNT_ID__:role/devops-cicd-pipeline-loki-irsa-role"
+
 loki:
   # No built-in auth (Grafana's own multi-tenant login system) in front of Loki
   # itself - the same reasoning already used for Jenkins in v7 and Grafana in v8:
@@ -31,13 +49,11 @@ loki:
           prefix: loki_index_
           period: 24h
 
-  # Points Loki at the S3 bucket created by hand outside Terraform (see iam.tf
-  # for why it isn't managed here) instead of the default local filesystem, which
-  # would be wiped out on every terraform destroy along with the EC2 instance
-  # itself. Credentials are never set explicitly - the AWS SDK inside Loki's
-  # container picks up the IAM Instance Profile attached to the EC2 instance
-  # automatically, through the instance metadata service, the same way any AWS
-  # CLI command running on that box already would.
+  # Points Loki at the same S3 bucket created by hand outside CloudFormation
+  # (see cloudformation/iam-irsa-stack.yaml) that's been used since v8.1 -
+  # unchanged in v10. What changed is only how Loki authenticates to it (see
+  # the serviceAccount block above); the bucket itself, its contents, and its
+  # 14-day lifecycle rule are untouched by the EKS migration.
   storage:
     type: s3
     bucketNames:
@@ -70,6 +86,39 @@ loki:
 # on and then never used.
 singleBinary:
   replicas: 1
+  # Disabled in v10. The chart requests a PersistentVolumeClaim for
+  # this Pod's local WAL/index cache by default, even though the real,
+  # durable backend is S3 - that PVC is just a performance buffer, not
+  # the source of truth. On k3s (through v9) that PVC bound instantly
+  # against the node's own local disk. EKS is different: as of 1.23,
+  # the in-tree EBS provisioner is gone and the EBS CSI driver isn't
+  # installed by default, so a fresh EKS cluster has no default
+  # StorageClass at all - the PVC just sits Pending forever, and
+  # `helm upgrade --wait` times out with "context deadline exceeded"
+  # since the Pod can never actually start. Disabling persistence here
+  # is the same call already made for Redis in v8 - nothing this Pod
+  # caches locally is worth provisioning a whole EBS CSI driver addon
+  # to persist.
+  persistence:
+    enabled: false
+  # Added right alongside persistence.enabled: false above, after
+  # discovering the first fix wasn't actually enough on its own.
+  # Disabling persistence only removes the PVC-backed volume the chart
+  # would otherwise mount at /var/loki - it doesn't provide any
+  # replacement. Combined with the loki container's own
+  # readOnlyRootFilesystem security setting, that left the container
+  # with nowhere to create its working directory at all, crashing
+  # immediately with "mkdir /var/loki: read-only file system". An
+  # explicit emptyDir at the exact same path is the standard fix here:
+  # Kubernetes doesn't care that the chart's own internal volume named
+  # "storage" no longer exists, only that something is mounted at
+  # /var/loki.
+  extraVolumes:
+    - name: loki-storage
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: loki-storage
+      mountPath: /var/loki
   resources:
     requests:
       cpu: 100m
@@ -102,7 +151,7 @@ gateway:
 # Both enabled by default in the chart, unlike MinIO and the gateway above -
 # each backed by its own memcached Deployment sized for a real production
 # workload (chunksCache alone defaults to requesting close to 10GB of memory).
-# That doesn't fit on a t3.large already running k3s, Prometheus, Grafana, and
+# That doesn't fit on a t3.large already running the whole monitoring stack and
 # the app itself, and neither cache is worth the memory for a portfolio
 # project's traffic volume in the first place.
 chunksCache:

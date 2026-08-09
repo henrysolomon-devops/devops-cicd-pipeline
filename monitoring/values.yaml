@@ -47,14 +47,17 @@ prometheus:
 # from the file that has secrets substituted into it at apply time.
 # Added in v8.1: kube-prometheus-stack ships default ServiceMonitors and
 # alerting rules for kube-scheduler, kube-controller-manager, etcd, and
-# kube-proxy - all written for a standard kubeadm cluster. k3s doesn't expose
-# any of these the same way (etcd in particular isn't reachable on the port
-# the chart expects), so these targets sit permanently "down". That was
-# harmless back in v8 with Alertmanager disabled, but now that it's enabled,
-# every one of those false targets would fire a TargetDown alert with no
-# `team` label, fall through to the default route, and flood #alerts-app with
-# noise that has nothing to do with this project's own app or infra alerts.
-# Disabling them here is the standard fix for kube-prometheus-stack on k3s.
+# kube-proxy - all written for a standard kubeadm cluster. Neither k3s (through
+# v9) nor EKS's own managed control plane (from v10 onward) exposes any of
+# these the same way - EKS in particular runs its control plane entirely
+# outside this account, so there's no Node these could ever be scraped from
+# even in principle. That was harmless back in v8 with Alertmanager disabled,
+# but now that it's enabled, every one of those false targets would fire a
+# TargetDown alert with no `team` label, fall through to the default route,
+# and flood #alerts-app with noise that has nothing to do with this project's
+# own app or infra alerts. Disabling them here is the standard fix for
+# kube-prometheus-stack on any cluster that doesn't expose its own
+# control-plane components as scrapeable Kubernetes Services.
 kubeScheduler:
   enabled: false
 kubeControllerManager:
@@ -68,25 +71,35 @@ alertmanager:
   enabled: true
 
 grafana:
+  # Changed in v10. eks.amazonaws.com/role-arn is the same IRSA
+  # mechanism now used for Loki (see monitoring/loki-values.yaml) -
+  # this is what lets Grafana's own Pod read CloudWatch Logs and
+  # metrics without any access key ever touching this file. Read-only,
+  # scoped to exactly this one purpose - see
+  # cloudformation/iam-irsa-stack.yaml's GrafanaCloudWatchIrsaRole for
+  # the exact permissions granted. __AWS_ACCOUNT_ID__ is substituted by
+  # infra.yml at apply time, the same pattern used for Loki's role ARN
+  # and the Slack webhook URLs.
+  serviceAccount:
+    create: true
+    name: monitoring-grafana
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::__AWS_ACCOUNT_ID__:role/devops-cicd-pipeline-grafana-cloudwatch-irsa-role"
+
   service:
-    # Changed in v9 from LoadBalancer to NodePort. The chart's own
-    # Service template only renders an explicit nodePort when type is
-    # exactly "NodePort" - under LoadBalancer, the nodePort value below
-    # was being silently ignored and Kubernetes assigned a random one
-    # instead, which is what caused the collision with the app's own
-    # ports in the first place. Access moves from
-    # http://<server-ip>:3000 to http://<server-ip>:5010 as a result -
-    # a different port, not a fundamentally different way of reaching
-    # it, since kube-proxy serves NodePort traffic on every Node
-    # directly, without needing Klipper the way LoadBalancer did.
+    # Changed in v10. Through v9, k3s's own --service-node-port-range
+    # flag was widened by hand (ansible/install-k3s.yml) so a low,
+    # memorable port like 5010 was valid at all. EKS's control plane is
+    # fully managed by AWS - there's no way to pass a custom
+    # --service-node-port-range flag to it, so this has to move into
+    # Kubernetes' own standard NodePort range (30000-32767) instead.
+    # 30010 was picked purely to still echo the old 5010 for anyone
+    # who remembers it. The security group enforcing "my own IP only"
+    # (cloudformation/eks-cluster-stack.yaml's
+    # GrafanaNodePortSecurityGroup) moves to match this exact port.
     type: NodePort
     port: 3000
-    # Pinned explicitly rather than left to Kubernetes to assign at
-    # random - this now actually takes effect, unlike under
-    # LoadBalancer above. Needs its own permanent rule in
-    # cloudformation/compute-stack.yaml, scoped to MyIp only, the same
-    # way SSH and the k3s API already are.
-    nodePort: 5010
+    nodePort: 30010
 
   sidecar:
     dashboards:
@@ -102,12 +115,15 @@ grafana:
       # grafana-dashboard-configmap.yaml template.
       label: grafana_dashboard
 
-  # Registers Loki as a queryable datasource in Grafana, added in v8.1. This is
-  # what makes the "Explore" tab (and any log panel added to a dashboard later)
-  # actually able to pull log lines back. The URL assumes Loki gets installed
-  # with the Helm release name "loki" into the "monitoring" namespace in
-  # infra.yml, since gateway.enabled is false in loki-values.yaml, this points
-  # straight at Loki's own Service rather than a gateway in front of it.
+  # Two datasources now, not one. Loki is unchanged from v8.1. CloudWatch
+  # is new in v10, and exists for exactly one reason: EKS's own control
+  # plane (api-server, audit logs, scheduler, controller-manager) runs
+  # entirely outside this account's visibility, so the only place its
+  # logs ever land is CloudWatch Logs, via the ClusterLogging config in
+  # cloudformation/eks-cluster-stack.yaml. Everything else this project
+  # already monitors - the app, Redis, node-level metrics - stays on
+  # Prometheus and Loki exactly as before; CloudWatch is deliberately
+  # scoped to just the one thing that has nowhere else to live.
   additionalDataSources:
     - name: Loki
       type: loki
@@ -115,16 +131,28 @@ grafana:
       url: http://loki.monitoring.svc.cluster.local:3100
       isDefault: false
       # A fixed uid, rather than letting Grafana generate a random one on every
-      # fresh install - the new log panel on the app dashboard (added in v8.1)
+      # fresh install - the log panel on the app dashboard (added in v8.1)
       # references this exact uid directly, and a random one would silently
-      # break that reference on every terraform destroy/apply cycle.
+      # break that reference on every infra destroy/apply cycle.
       uid: loki
+
+    - name: CloudWatch
+      type: cloudwatch
+      access: proxy
+      isDefault: false
+      uid: cloudwatch
+      jsonData:
+        # "default" tells the CloudWatch plugin to use whatever AWS
+        # credentials are already available to the Pod - which, thanks
+        # to the serviceAccount annotation above, means the IRSA role's
+        # temporary credentials, not a stored access key.
+        authType: default
+        defaultRegion: us-east-1
 
   # No login screen. This mirrors the exact reasoning used for Jenkins
   # in v7 (securityRealm: None there): access to this port is already
-  # restricted at the network level, to MyIp only, via
-  # cloudformation/compute-stack.yaml, so a login prompt on top of that
-  # would just be friction with no real security benefit.
+  # restricted at the network level, to MyIp only, so a login prompt on
+  # top of that would just be friction with no real security benefit.
   grafana.ini:
     auth.anonymous:
       enabled: true

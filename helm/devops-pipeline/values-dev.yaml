@@ -15,6 +15,13 @@ appEnv: "dev"
 # address lands here. See app/app.py for how the app itself uses this.
 appUrlPrefix: "/dev"
 
+# Added in v10, the direct equivalent of the old DevListenerRule's
+# Priority: 10 in cloudformation/loadbalancer-stack.yaml (v9). See
+# values.yaml's ingress block for why this needs to be unique across
+# environments in the first place.
+ingress:
+  groupOrder: "10"
+
 # Before v6, this tag was never stored in a file at all - deploy.yml
 # passed it straight to Helm with --set image.tag=<sha> at deploy time.
 # Now that ArgoCD is the one applying changes (by reading this file,
@@ -25,10 +32,9 @@ appUrlPrefix: "/dev"
 image:
   tag: "ddbfa4887b6fbf9a9e89fff2bb242d3f4ef05362"
 
-# No service.port/nodePort override needed here - the base values.yaml
-# default (5000) already is dev's port. staging and production each
-# override it below since they need their own distinct port on the
-# same server.
+# No service.port override needed here, or in any environment as of
+# v10 - see values.yaml for why all three environments can now safely
+# share the exact same port.
 
 # Added in v8: this Release is the one that carries the shared Grafana
 # dashboard ConfigMap, since it only needs to be registered with

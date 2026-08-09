@@ -1,27 +1,42 @@
-# This is the first of three CloudFormation stacks that replace what
-# terraform/ used to manage in a single state file. Splitting it this
-# way mirrors how a lot of real infrastructure teams organize things -
-# a network layer that barely ever changes, sitting underneath layers
-# that change much more often (the server, the load balancer). Each
-# layer gets its own stack, its own lifecycle, and its own blast radius.
+# This is the first of what's now four CloudFormation stacks (up from
+# three in v9). The network layer itself barely changes for v10 - same
+# VPC, same two public subnets, same internet gateway, same route table.
+# What's new is a set of tags on both subnets that EKS and the AWS Load
+# Balancer Controller both silently depend on to discover which subnets
+# belong to which cluster.
 #
-# This stack builds the same VPC, public subnet, internet gateway, and
-# route table that terraform/network.tf used to - same CIDR ranges, same
-# naming, so nothing about the network itself actually changes, only the
-# tool that describes it.
+# Worth calling out up front: PublicSubnetTwo existed in v9 purely to
+# satisfy the ALB's own multi-AZ requirement - it never held an EC2
+# instance. In v10 it picks up a second, independent reason to exist:
+# EKS itself refuses to create a cluster with fewer than two subnets in
+# two different Availability Zones, entirely separate from anything the
+# Load Balancer Controller needs. Two unrelated AWS services landing on
+# the exact same "two AZs, minimum" requirement is a coincidence worth
+# noting, not a sign this subnet is doing double duty by accident.
 
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  devops-cicd-pipeline - networking layer (VPC, public subnet, internet
-  gateway, route table). Deployed and torn down as its own stack so the
-  compute and load balancer stacks can be rebuilt independently without
-  ever touching the network underneath them.
+  devops-cicd-pipeline - networking layer (VPC, two public subnets,
+  internet gateway, route table). Deployed and torn down as its own
+  stack so the EKS cluster stack above it can be rebuilt independently
+  without ever touching the network underneath it.
+
+Parameters:
+  EksClusterName:
+    Type: String
+    Default: devops-pipeline-eks
+    Description: >
+      Name of the EKS cluster that will eventually sit on top of these
+      subnets. Needed here, in the network stack, purely so the
+      "kubernetes.io/cluster/<name>: shared" tag below can be set
+      correctly - EKS and the AWS Load Balancer Controller both use this
+      tag to discover which subnets they're allowed to use, and neither
+      one will find these subnets without it, no matter how correctly
+      everything else is configured. This has to match the cluster name
+      used in eks-cluster-stack.yaml exactly, or discovery silently
+      fails with no clear error pointing at the tag.
 
 Resources:
-  # 10.0.0.0/16 is far more address space than one EC2 instance will
-  # ever need, but it's the conventional starting range almost everyone
-  # reaches for, so there's no real reason to pick something smaller
-  # and more unusual just to save address space nobody will use.
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -32,35 +47,40 @@ Resources:
         - Key: Name
           Value: devops-pipeline-vpc
 
-  # Just a slice carved out of the VPC above. It only actually becomes
-  # "public" once it's wired up to the internet gateway and route table
-  # further down - the name alone doesn't do anything on its own.
+  # The only subnet the EC2 worker node itself ever lives in, same as
+  # every version since v9. The two new tags below are what actually
+  # changes for v10:
   #
-  # This is the only subnet the EC2 instance itself ever lives in - see
-  # PublicSubnetTwo below for why a second, otherwise-unused subnet also
-  # exists in this stack now.
+  # - kubernetes.io/cluster/<name>: shared tells both EKS itself and the
+  #   AWS Load Balancer Controller "this subnet belongs to this cluster,
+  #   you're allowed to use it." Without it, the node group can still
+  #   technically launch here, but the Load Balancer Controller will
+  #   refuse to place an ALB in a subnet it doesn't recognize as its own.
+  # - kubernetes.io/role/elb: 1 tells the Load Balancer Controller
+  #   specifically "this is a public subnet, put internet-facing load
+  #   balancers here." There's a matching kubernetes.io/role/internal-elb
+  #   tag for private subnets, not used here since this project has no
+  #   private subnets at all.
   PublicSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
       MapPublicIpOnLaunch: true
-      # Pinning to the first AZ CloudFormation reports for this region,
-      # the same way network.tf pinned to "${var.aws_region}a" - a
-      # single EC2 instance doesn't need multi-AZ placement, so there's
-      # no reason to complicate this with an AZ parameter.
       AvailabilityZone: !Select [0, !GetAZs ""]
       Tags:
         - Key: Name
           Value: devops-pipeline-public-subnet
+        - Key: !Sub "kubernetes.io/cluster/${EksClusterName}"
+          Value: shared
+        - Key: kubernetes.io/role/elb
+          Value: "1"
 
-  # Added in v9, purely to satisfy a real AWS constraint: an Application
-  # Load Balancer refuses to deploy into a single Availability Zone, it
-  # always needs at least two subnets in two different AZs, even when
-  # every actual server sits in just one of them. This subnet never
-  # holds an EC2 instance - its only job is giving the ALB (built in
-  # loadbalancer-stack.yaml) a second AZ to register against. Costs
-  # nothing on its own; an empty subnet has no billable resources in it.
+  # Same two new tags as above - EKS needs both subnets tagged
+  # identically, not just the one the node actually runs in, since the
+  # cluster itself (not just the Load Balancer Controller) checks these
+  # tags when deciding which subnets it's allowed to schedule networking
+  # resources into.
   PublicSubnetTwo:
     Type: AWS::EC2::Subnet
     Properties:
@@ -71,10 +91,11 @@ Resources:
       Tags:
         - Key: Name
           Value: devops-pipeline-public-subnet-two
+        - Key: !Sub "kubernetes.io/cluster/${EksClusterName}"
+          Value: shared
+        - Key: kubernetes.io/role/elb
+          Value: "1"
 
-  # The actual door between this VPC and the internet. Without this,
-  # the server could exist just fine internally, but nothing outside
-  # AWS could reach it, and it couldn't reach out either.
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
@@ -82,17 +103,12 @@ Resources:
         - Key: Name
           Value: devops-pipeline-igw
 
-  # An Internet Gateway has to be explicitly attached to a VPC before
-  # it does anything - creating it alone isn't enough.
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # Route table - basically a set of directions for traffic. This one
-  # says: anything leaving the subnet for an address outside the VPC
-  # (0.0.0.0/0) goes out through the gateway above.
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -103,52 +119,42 @@ Resources:
 
   PublicRoute:
     Type: AWS::EC2::Route
-    # Depends on the gateway actually being attached first - without
-    # this, CloudFormation can try to create the route before the
-    # gateway is usable and the deploy fails.
     DependsOn: AttachGateway
     Properties:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
-  # The route table doesn't do anything until it's actually attached to
-  # a subnet - this is that attachment.
   PublicSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
 
-  # Same route table, same internet access - the second subnet only
-  # exists for the ALB's AZ requirement, but it still needs a path out
-  # to the internet like any other public subnet would.
   PublicSubnetTwoRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnetTwo
       RouteTableId: !Ref PublicRouteTable
 
-# Everything below gets picked up by the compute stack next, through
-# Fn::ImportValue. Export names are fixed strings rather than anything
-# derived from the stack's own name, so the compute stack can reference
-# them reliably no matter what this stack happens to be called at
-# deploy time.
+# Everything below gets picked up by the EKS cluster stack next, through
+# Fn::ImportValue - the same export names as v9, unchanged, so nothing
+# downstream has to be aware this stack changed at all beyond the tags.
 Outputs:
   VpcId:
-    Description: ID of the VPC, needed by the compute and load balancer stacks
+    Description: ID of the VPC, needed by the EKS cluster stack
     Value: !Ref VPC
     Export:
       Name: devops-pipeline-vpc-id
 
   PublicSubnetId:
-    Description: ID of the public subnet, needed by the compute stack for the EC2 instance
+    Description: ID of the first public subnet, needed by the EKS cluster stack
     Value: !Ref PublicSubnet
     Export:
       Name: devops-pipeline-public-subnet-id
 
   PublicSubnetTwoId:
-    Description: ID of the second public subnet, needed by the load balancer stack to satisfy the ALB's multi-AZ requirement
+    Description: ID of the second public subnet, needed by the EKS cluster stack to satisfy its own multi-AZ requirement
     Value: !Ref PublicSubnetTwo
     Export:
       Name: devops-pipeline-public-subnet-two-id

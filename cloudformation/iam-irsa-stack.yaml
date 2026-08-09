@@ -1,0 +1,422 @@
+# The third of four stacks, deployed right after eks-cluster-stack.yaml
+# since every role in here depends on that stack's OIDC provider already
+# existing. This whole file replaces the single LokiS3AccessRole /
+# LokiS3AccessInstanceProfile pair that used to live in compute-stack.yaml
+# through v9.
+#
+# The conceptual shift worth sitting with here: an Instance Profile
+# grants permissions to *the EC2 instance itself* - every process
+# running on that box, whether it's Loki, Alloy, or a stray shell
+# session, shares the exact same AWS identity. IRSA grants permissions
+# to *one specific Kubernetes ServiceAccount* - Loki's Pod gets exactly
+# the S3 access it needs, and nothing else on the same node, not even
+# another Pod in the same namespace, can assume that role unless its own
+# ServiceAccount is explicitly trusted too. This is real least-privilege
+# at the Pod level, something k3s without IRSA could never actually
+# offer no matter how carefully the instance profile was scoped.
+#
+# A note on how the trust policy below is written: a normal YAML mapping
+# can't hold two entries whose *keys* both need the OIDC issuer URL
+# substituted into them ("<issuer>:aud" and "<issuer>:sub") - there's no
+# clean, universally-safe way to express two dynamic keys in the same
+# block mapping. Rather than lean on a fragile trick that happens to
+# work with CloudFormation's own YAML transform but breaks any standard
+# YAML tool (and is genuinely hard to verify without a real deploy),
+# each AssumeRolePolicyDocument below is written as a single raw JSON
+# string through Fn::Sub instead - the whole trust policy document gets
+# its placeholders substituted in one pass, then CloudFormation parses
+# the result as JSON. This is the pattern AWS's own IRSA documentation
+# uses for exactly this situation.
+#
+# Three roles live here, one per ServiceAccount that needs real AWS
+# permissions:
+#   - Loki, for S3 access to its log bucket (the direct replacement for
+#     the v8.1-v9 instance profile)
+#   - The AWS Load Balancer Controller, so it can create and manage the
+#     ALB, Target Groups, and Listener Rules on our behalf - the thing
+#     that makes an Ingress resource actually turn into a real load
+#     balancer
+#   - Grafana, for read-only CloudWatch access - the one new piece of
+#     AWS-specific plumbing this version adds, needed only because EKS
+#     control plane logs exist nowhere except CloudWatch
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  devops-cicd-pipeline - IRSA layer (three IAM roles, each trusted only
+  by one specific Kubernetes ServiceAccount via the EKS cluster's own
+  OIDC provider). Depends on the EKS cluster stack's exported OIDC
+  provider ARN, plus its issuer URL passed in as a parameter.
+
+Parameters:
+  OidcProviderUrl:
+    Type: String
+    Description: >
+      Issuer URL of the EKS cluster's OIDC provider, without the leading
+      https:// (e.g. oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE...).
+      Resolved by infra.yml from the EKS cluster stack's own
+      OidcProviderUrl output right before this stack deploys.
+
+  LokiLogsBucketName:
+    Type: String
+    Default: devops-cicd-pipeline-loki-logs
+    Description: >
+      Name of the manually-created S3 bucket Loki uses for log chunk
+      storage - unchanged from every version since v8.1, still created
+      by hand and living outside every stack on purpose.
+
+Resources:
+  # Trusted only by the "loki" ServiceAccount in the "monitoring"
+  # namespace - the exact name Loki's own Helm chart creates for itself
+  # by default.
+  LokiIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: devops-cicd-pipeline-loki-irsa-role
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Federated": "${OidcProviderArn}"
+                  },
+                  "Action": "sts:AssumeRoleWithWebIdentity",
+                  "Condition": {
+                    "StringEquals": {
+                      "${OidcProviderUrl}:aud": "sts.amazonaws.com",
+                      "${OidcProviderUrl}:sub": "system:serviceaccount:monitoring:loki"
+                    }
+                  }
+                }
+              ]
+            }
+          - OidcProviderArn: !ImportValue devops-pipeline-eks-oidc-provider-arn
+      Policies:
+        - PolicyName: loki-s3-bucket-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "arn:aws:s3:::${LokiLogsBucketName}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${LokiLogsBucketName}"
+
+  # Trusted only by "aws-load-balancer-controller" in "kube-system" -
+  # the ServiceAccount name and namespace the controller's own Helm
+  # chart expects by default.
+  AwsLoadBalancerControllerIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: devops-cicd-pipeline-alb-controller-irsa-role
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Federated": "${OidcProviderArn}"
+                  },
+                  "Action": "sts:AssumeRoleWithWebIdentity",
+                  "Condition": {
+                    "StringEquals": {
+                      "${OidcProviderUrl}:aud": "sts.amazonaws.com",
+                      "${OidcProviderUrl}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller"
+                    }
+                  }
+                }
+              ]
+            }
+          - OidcProviderArn: !ImportValue devops-pipeline-eks-oidc-provider-arn
+      ManagedPolicyArns:
+        - !Ref AwsLoadBalancerControllerPolicy
+
+  # AWS's own published permission set for the Load Balancer Controller,
+  # pinned to the same v3.5.0 release the Helm install in infra.yml
+  # uses - keeping the policy version and the controller version in
+  # lockstep matters here, since the controller occasionally needs a
+  # newly added permission to support a feature from a newer release.
+  # Sourced directly from the controller's official GitHub repo
+  # (raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v3.5.0/docs/install/iam_policy.json)
+  # rather than hand-written, since getting ALB/Target Group permissions
+  # exactly right by hand is exactly the kind of thing worth trusting
+  # the source over guessing at. Confirmed identical to the v2.14.1
+  # policy checked while first drafting this file - the permission set
+  # itself hasn't changed across that range of releases, only the chart
+  # and controller version numbers converged from separate v1.x/v2.x
+  # tracks onto a shared v3.x one. Defined as a real resource in this
+  # stack, not a file infra.yml has to separately create and delete -
+  # it's just JSON, recreating it costs nothing and loses no state, so
+  # there's no reason to treat it any differently from the roles around
+  # it that already live and die with this stack's own apply/destroy
+  # cycle.
+  AwsLoadBalancerControllerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: devops-cicd-pipeline-alb-controller-policy
+      PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - iam:CreateServiceLinkedRole
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+            - Effect: Allow
+              Action:
+              - ec2:DescribeAccountAttributes
+              - ec2:DescribeAddresses
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInternetGateways
+              - ec2:DescribeVpcs
+              - ec2:DescribeVpcPeeringConnections
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeInstances
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeTags
+              - ec2:GetCoipPoolUsage
+              - ec2:DescribeCoipPools
+              - ec2:GetSecurityGroupsForVpc
+              - ec2:DescribeIpamPools
+              - ec2:DescribeRouteTables
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeLoadBalancerAttributes
+              - elasticloadbalancing:DescribeListeners
+              - elasticloadbalancing:DescribeListenerCertificates
+              - elasticloadbalancing:DescribeSSLPolicies
+              - elasticloadbalancing:DescribeRules
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetGroupAttributes
+              - elasticloadbalancing:DescribeTargetHealth
+              - elasticloadbalancing:DescribeTags
+              - elasticloadbalancing:DescribeTrustStores
+              - elasticloadbalancing:DescribeListenerAttributes
+              - elasticloadbalancing:DescribeCapacityReservation
+              Resource: '*'
+            - Effect: Allow
+              Action:
+              - cognito-idp:DescribeUserPoolClient
+              - acm:ListCertificates
+              - acm:DescribeCertificate
+              - iam:ListServerCertificates
+              - iam:GetServerCertificate
+              - waf-regional:GetWebACL
+              - waf-regional:GetWebACLForResource
+              - waf-regional:AssociateWebACL
+              - waf-regional:DisassociateWebACL
+              - wafv2:GetWebACL
+              - wafv2:GetWebACLForResource
+              - wafv2:AssociateWebACL
+              - wafv2:DisassociateWebACL
+              - shield:GetSubscriptionState
+              - shield:DescribeProtection
+              - shield:CreateProtection
+              - shield:DeleteProtection
+              Resource: '*'
+            - Effect: Allow
+              Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              Resource: '*'
+            - Effect: Allow
+              Action:
+              - ec2:CreateSecurityGroup
+              Resource: '*'
+            - Effect: Allow
+              Action:
+              - ec2:CreateTags
+              Resource: arn:aws:ec2:*:*:security-group/*
+              Condition:
+                StringEquals:
+                  ec2:CreateAction: CreateSecurityGroup
+                'Null':
+                  aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+            - Effect: Allow
+              Action:
+              - ec2:CreateTags
+              - ec2:DeleteTags
+              Resource: arn:aws:ec2:*:*:security-group/*
+              Condition:
+                'Null':
+                  aws:RequestTag/elbv2.k8s.aws/cluster: 'true'
+                  aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+            - Effect: Allow
+              Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:DeleteSecurityGroup
+              Resource: '*'
+              Condition:
+                'Null':
+                  aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:CreateLoadBalancer
+              - elasticloadbalancing:CreateTargetGroup
+              Resource: '*'
+              Condition:
+                'Null':
+                  aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:CreateListener
+              - elasticloadbalancing:DeleteListener
+              - elasticloadbalancing:CreateRule
+              - elasticloadbalancing:DeleteRule
+              Resource: '*'
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:RemoveTags
+              Resource:
+              - arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*
+              Condition:
+                'Null':
+                  aws:RequestTag/elbv2.k8s.aws/cluster: 'true'
+                  aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:RemoveTags
+              Resource:
+              - arn:aws:elasticloadbalancing:*:*:listener/net/*/*/*
+              - arn:aws:elasticloadbalancing:*:*:listener/app/*/*/*
+              - arn:aws:elasticloadbalancing:*:*:listener-rule/net/*/*/*
+              - arn:aws:elasticloadbalancing:*:*:listener-rule/app/*/*/*
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:ModifyLoadBalancerAttributes
+              - elasticloadbalancing:SetIpAddressType
+              - elasticloadbalancing:SetSecurityGroups
+              - elasticloadbalancing:SetSubnets
+              - elasticloadbalancing:DeleteLoadBalancer
+              - elasticloadbalancing:ModifyTargetGroup
+              - elasticloadbalancing:ModifyTargetGroupAttributes
+              - elasticloadbalancing:DeleteTargetGroup
+              - elasticloadbalancing:ModifyListenerAttributes
+              - elasticloadbalancing:ModifyCapacityReservation
+              - elasticloadbalancing:ModifyIpPools
+              Resource: '*'
+              Condition:
+                'Null':
+                  aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:AddTags
+              Resource:
+              - arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*
+              Condition:
+                StringEquals:
+                  elasticloadbalancing:CreateAction:
+                  - CreateTargetGroup
+                  - CreateLoadBalancer
+                'Null':
+                  aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:RegisterTargets
+              - elasticloadbalancing:DeregisterTargets
+              Resource: arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:SetWebAcl
+              - elasticloadbalancing:ModifyListener
+              - elasticloadbalancing:AddListenerCertificates
+              - elasticloadbalancing:RemoveListenerCertificates
+              - elasticloadbalancing:ModifyRule
+              - elasticloadbalancing:SetRulePriorities
+              Resource: '*'
+
+  # Trusted only by "monitoring-grafana" in "monitoring" - the
+  # ServiceAccount name kube-prometheus-stack's Grafana subchart creates
+  # given the Helm release name "monitoring" used since v8
+  # (helm upgrade --install monitoring prometheus-community/kube-prometheus-stack).
+  # Read-only on purpose: Grafana only ever needs to read CloudWatch
+  # Logs and metrics to display them, never to change anything about
+  # CloudWatch itself.
+  GrafanaCloudWatchIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: devops-cicd-pipeline-grafana-cloudwatch-irsa-role
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Federated": "${OidcProviderArn}"
+                  },
+                  "Action": "sts:AssumeRoleWithWebIdentity",
+                  "Condition": {
+                    "StringEquals": {
+                      "${OidcProviderUrl}:aud": "sts.amazonaws.com",
+                      "${OidcProviderUrl}:sub": "system:serviceaccount:monitoring:monitoring-grafana"
+                    }
+                  }
+                }
+              ]
+            }
+          - OidcProviderArn: !ImportValue devops-pipeline-eks-oidc-provider-arn
+      Policies:
+        - PolicyName: grafana-cloudwatch-read-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:GetLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:FilterLogEvents
+                  - logs:GetLogGroupFields
+                  - logs:GetQueryResults
+                  - logs:StartQuery
+                  - logs:StopQuery
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:DescribeAlarmsForMetric
+                Resource: "*"
+
+Outputs:
+  LokiIrsaRoleArn:
+    Description: ARN of Loki's IRSA role, referenced in monitoring/loki-values.yaml's serviceAccount annotations
+    Value: !GetAtt LokiIrsaRole.Arn
+    Export:
+      Name: devops-pipeline-loki-irsa-role-arn
+
+  AwsLoadBalancerControllerIrsaRoleArn:
+    Description: ARN of the AWS Load Balancer Controller's IRSA role
+    Value: !GetAtt AwsLoadBalancerControllerIrsaRole.Arn
+    Export:
+      Name: devops-pipeline-alb-controller-irsa-role-arn
+
+  GrafanaCloudWatchIrsaRoleArn:
+    Description: ARN of Grafana's IRSA role, referenced in monitoring/values.yaml's grafana.serviceAccount annotations
+    Value: !GetAtt GrafanaCloudWatchIrsaRole.Arn
+    Export:
+      Name: devops-pipeline-grafana-cloudwatch-irsa-role-arn
