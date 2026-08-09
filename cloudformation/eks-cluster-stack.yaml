@@ -181,6 +181,29 @@ Resources:
           AccessScope:
             Type: cluster
 
+  # A second Access Entry, this time for the AWS account's root user.
+  # Added after discovering that AWS CloudShell - used for manual
+  # debugging throughout this version, since kubectl from a local
+  # machine or a GitHub Actions runner isn't always convenient mid-
+  # incident - authenticates as root, not as GithubActionsRoleArn.
+  # With BootstrapClusterCreatorAdminPermissions explicitly disabled
+  # above, root had no implicit access either, so kubectl from
+  # CloudShell failed with "the server has asked for the client to
+  # provide credentials" despite AWS's own auth succeeding - a valid
+  # AWS identity with no corresponding Access Entry can authenticate
+  # but has no authorization to do anything. This makes every future
+  # CloudShell session usable for debugging without hitting the same
+  # thing again.
+  RootAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+
   # The prerequisite every IRSA role in iam-irsa-stack.yaml depends on.
   # Without this, no ServiceAccount in the cluster (Loki's, the Load
   # Balancer Controller's, Grafana's) can ever assume an IAM role -
