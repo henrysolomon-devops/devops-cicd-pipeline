@@ -255,6 +255,21 @@ Resources:
             Groups:
               - !GetAtt EksCluster.ClusterSecurityGroupId
               - !Ref GrafanaNodePortSecurityGroup
+        # Once a LaunchTemplate is attached to a Managed Node Group,
+        # EKS requires disk size to be configured here rather than as
+        # the Nodegroup resource's own top-level DiskSize property -
+        # specifying it in both places (or only on the Nodegroup) fails
+        # outright once a LaunchTemplate is in the picture at all.
+        # /dev/xvda is the root device name every EKS-optimized AMI
+        # (AL2 and AL2023 alike) actually uses - a block device mapping
+        # against any other device name creates a second, separate
+        # volume instead of resizing the root one, which isn't what's
+        # wanted here.
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
         TagSpecifications:
           - ResourceType: instance
             Tags:
@@ -275,7 +290,6 @@ Resources:
       InstanceTypes:
         - t3.large
       AmiType: AL2023_x86_64_STANDARD
-      DiskSize: 30
       ScalingConfig:
         MinSize: 1
         MaxSize: 1
