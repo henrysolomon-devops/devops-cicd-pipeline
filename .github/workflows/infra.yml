@@ -463,6 +463,20 @@ jobs:
       # first) would leave an orphaned ALB and ENIs still attached to
       # the subnets, and network-stack's own delete would then fail
       # with a dependency error.
+      # ArgoCD's own selfHeal (enabled on all three Applications since
+      # v6) means a plain `kubectl delete ingress` can lose a race
+      # against ArgoCD noticing the "drift" and recreating the Ingress
+      # straight back from Git within seconds. Deleting the
+      # Applications themselves first removes the thing that would
+      # otherwise keep fighting this deletion.
+      - name: Delete the three ArgoCD Applications
+        if: inputs.action == 'destroy'
+        run: |
+          export KUBECONFIG=~/.kube/devops-pipeline-config
+          kubectl delete application devops-pipeline-dev -n argocd --ignore-not-found || true
+          kubectl delete application devops-pipeline-staging -n argocd --ignore-not-found || true
+          kubectl delete application devops-pipeline-production -n argocd --ignore-not-found || true
+
       - name: Delete every Ingress so the Load Balancer Controller tears down the ALB
         if: inputs.action == 'destroy'
         run: |
@@ -473,14 +487,21 @@ jobs:
       # apart - 100 seconds total) turned out to be nowhere near enough
       # on a real destroy run: the ALB was still ACTIVE when the loop
       # gave up, and network-stack's own deletion started anyway,
-      # requiring a manual `aws elbv2 delete-load-balancer` and
-      # `delete-target-group` to unblock it. Widened to 40 tries, 15
-      # seconds apart - 10 minutes total, generous enough to cover a
-      # real ALB deletion without needing to babysit this step by hand.
-      - name: Wait for the ALB itself to actually disappear
+      # A brief, non-blocking attempt to let the AWS Load Balancer
+      # Controller clean up gracefully on its own - better AWS hygiene
+      # (it releases its own ENIs and Target Group registrations
+      # properly) than skipping straight to a forced API-level cleanup.
+      # Deliberately does NOT block the rest of the job if the ALB is
+      # still around after this: the EKS cluster stack's own deletion
+      # never actually depends on the ALB being gone (only the network
+      # stack does, further down, because of ENIs sitting in its
+      # subnets) - the definitive cleanup happens right before that
+      # step instead, once the cluster and its controller are already
+      # gone and there's nothing left to coordinate with anyway.
+      - name: Give the Load Balancer Controller a chance to clean up the ALB on its own
         if: inputs.action == 'destroy'
         run: |
-          for i in $(seq 1 40); do
+          for i in $(seq 1 12); do
             COUNT=$(aws elbv2 describe-load-balancers \
               --query "length(LoadBalancers[?contains(LoadBalancerName, 'k8s-devops')])" \
               --output text 2>/dev/null || echo "0")
@@ -488,18 +509,56 @@ jobs:
               echo "ALB is gone."
               break
             fi
-            echo "Still waiting on the ALB to be deleted (attempt $i/40)..."
-            sleep 15
+            echo "Still waiting on the ALB Controller to clean up (attempt $i/12)..."
+            sleep 10
           done
 
-      # Discovered on a real destroy run: the three per-environment
-      # Target Groups can outlive the ALB itself even once it's fully
-      # deleted - they're independent resources, not automatically
-      # cleaned up just because the load balancer that referenced them
-      # is gone. Deleting them explicitly here, rather than assuming
-      # the controller already handled it, avoids leaving orphaned
-      # Target Groups behind after every destroy.
-      - name: Delete any leftover Target Groups
+      # Stacks come down in the exact reverse order they went up in.
+      # The IRSA stack has to go first, specifically because it imports
+      # the EKS cluster stack's OIDC provider ARN - CloudFormation won't
+      # allow deleting a stack while another stack still has an active
+      # Fn::ImportValue reference to one of its Exports.
+      - name: Delete the IRSA stack
+        if: inputs.action == 'destroy'
+        run: aws cloudformation delete-stack --stack-name devops-pipeline-irsa
+
+      - name: Wait for the IRSA stack to finish deleting
+        if: inputs.action == 'destroy'
+        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-irsa
+
+      - name: Delete the EKS cluster stack
+        if: inputs.action == 'destroy'
+        run: aws cloudformation delete-stack --stack-name devops-pipeline-eks
+
+      - name: Wait for the EKS cluster stack to finish deleting
+        if: inputs.action == 'destroy'
+        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-eks
+
+      # This is the definitive cleanup, not the earlier best-effort
+      # one. By this point the EKS cluster - and the Load Balancer
+      # Controller Pod running inside it - are both already gone, so
+      # there's no controller left to coordinate with at all: any ALB,
+      # Target Group, or security group still around at this point has
+      # to be removed directly through the AWS API. This runs
+      # unconditionally, regardless of whether the earlier graceful
+      # attempt succeeded, since it's cheap to run against nothing and
+      # is the actual guarantee that network-stack's own deletion won't
+      # get blocked by a leftover ALB, Target Group, or security group
+      # a few steps down.
+      - name: Force-delete any ALB still left over
+        if: inputs.action == 'destroy'
+        run: |
+          for arn in $(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?contains(LoadBalancerName, 'k8s-devops')].LoadBalancerArn" \
+            --output text); do
+            echo "Deleting leftover ALB: $arn"
+            aws elbv2 delete-load-balancer --load-balancer-arn "$arn" || true
+          done
+          # Give AWS a moment to actually process the deletion before
+          # touching anything that references it.
+          sleep 20
+
+      - name: Force-delete any Target Groups still left over
         if: inputs.action == 'destroy'
         run: |
           for tg in $(aws elbv2 describe-target-groups \
@@ -509,18 +568,11 @@ jobs:
             aws elbv2 delete-target-group --target-group-arn "$tg" || true
           done
 
-      # Confirmed on a real destroy run: a security group can still be
-      # attached to a not-yet-fully-detached ENI for a few seconds
-      # after the ALB and Target Groups referencing it are gone,
-      # causing a DependencyViolation on the first delete attempt. The
-      # original version of this step used `|| true` and moved on
-      # regardless, which happened to work out because enough time
-      # passed before network-stack's own deletion further down for
-      # the ENI to finish detaching on its own - but that's luck, not
-      # a guarantee. This retries each security group up to 6 times,
-      # 10 seconds apart, actually confirming deletion rather than
-      # hoping the timing works out again.
-      - name: Delete the Load Balancer Controller's own security groups
+      # Retries each security group, since one can still be attached to
+      # a not-yet-fully-detached ENI for a few seconds right after its
+      # ALB is deleted, causing a DependencyViolation on the very first
+      # attempt.
+      - name: Force-delete any Load Balancer Controller security groups still left over
         if: inputs.action == 'destroy'
         run: |
           VPC_ID=$(aws cloudformation describe-stacks \
@@ -546,27 +598,6 @@ jobs:
               done
             done
           fi
-
-      # Stacks come down in the exact reverse order they went up in.
-      # The IRSA stack has to go first, specifically because it imports
-      # the EKS cluster stack's OIDC provider ARN - CloudFormation won't
-      # allow deleting a stack while another stack still has an active
-      # Fn::ImportValue reference to one of its Exports.
-      - name: Delete the IRSA stack
-        if: inputs.action == 'destroy'
-        run: aws cloudformation delete-stack --stack-name devops-pipeline-irsa
-
-      - name: Wait for the IRSA stack to finish deleting
-        if: inputs.action == 'destroy'
-        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-irsa
-
-      - name: Delete the EKS cluster stack
-        if: inputs.action == 'destroy'
-        run: aws cloudformation delete-stack --stack-name devops-pipeline-eks
-
-      - name: Wait for the EKS cluster stack to finish deleting
-        if: inputs.action == 'destroy'
-        run: aws cloudformation wait stack-delete-complete --stack-name devops-pipeline-eks
 
       - name: Delete the network stack
         if: inputs.action == 'destroy'
