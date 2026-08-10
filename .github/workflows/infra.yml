@@ -509,20 +509,17 @@ jobs:
             aws elbv2 delete-target-group --target-group-arn "$tg" || true
           done
 
-      # The AWS Load Balancer Controller creates its own security
-      # groups directly against the VPC (the ALB's own SG, and a
-      # shared backend SG for traffic between the ALB and the Pods it
-      # targets) - neither one is a CloudFormation resource, so nothing
-      # above this step ever cleans them up. Discovered the hard way:
-      # with the ALB and Target Groups already gone, these two
-      # leftover security groups were still attached to the VPC and
-      # blocked network-stack's own deletion with a generic
-      # "has dependent resources" error, needing a manual
-      # describe/delete cycle to unblock. Filtering by VPC ID and name
-      # pattern here, rather than deleting all non-default groups in
-      # the VPC, avoids ever touching GrafanaNodePortSecurityGroup or
-      # anything else CloudFormation still owns and will clean up on
-      # its own a few steps down.
+      # Confirmed on a real destroy run: a security group can still be
+      # attached to a not-yet-fully-detached ENI for a few seconds
+      # after the ALB and Target Groups referencing it are gone,
+      # causing a DependencyViolation on the first delete attempt. The
+      # original version of this step used `|| true` and moved on
+      # regardless, which happened to work out because enough time
+      # passed before network-stack's own deletion further down for
+      # the ENI to finish detaching on its own - but that's luck, not
+      # a guarantee. This retries each security group up to 6 times,
+      # 10 seconds apart, actually confirming deletion rather than
+      # hoping the timing works out again.
       - name: Delete the Load Balancer Controller's own security groups
         if: inputs.action == 'destroy'
         run: |
@@ -535,7 +532,18 @@ jobs:
               --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=k8s-*" \
               --query "SecurityGroups[].GroupId" --output text); do
               echo "Deleting Load Balancer Controller security group: $sg"
-              aws ec2 delete-security-group --group-id "$sg" || true
+              for i in $(seq 1 6); do
+                if aws ec2 delete-security-group --group-id "$sg" 2>/tmp/sg-delete-error; then
+                  echo "Deleted $sg."
+                  break
+                fi
+                if grep -q "InvalidGroup.NotFound" /tmp/sg-delete-error; then
+                  echo "$sg is already gone."
+                  break
+                fi
+                echo "Still has a dependency, retrying $sg (attempt $i/6)..."
+                sleep 10
+              done
             done
           fi
 
