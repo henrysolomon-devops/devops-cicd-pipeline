@@ -456,17 +456,18 @@ jobs:
           export KUBECONFIG=~/.kube/devops-pipeline-config
           kubectl delete ingress --all --all-namespaces --ignore-not-found --timeout=60s || true
 
-      # The controller's own ALB deletion happens asynchronously in the
-      # background after the Ingress is gone, so this polls
-      # elbv2 directly rather than assuming it's already done the
-      # moment kubectl returns. Ten tries, ten seconds apart, is
-      # generous for a single ALB with three Target Groups - if it's
-      # still stuck at the end of this loop, the next stack delete will
-      # fail loudly and clearly rather than this step failing silently.
+      # The original version of this wait loop (10 tries, 10 seconds
+      # apart - 100 seconds total) turned out to be nowhere near enough
+      # on a real destroy run: the ALB was still ACTIVE when the loop
+      # gave up, and network-stack's own deletion started anyway,
+      # requiring a manual `aws elbv2 delete-load-balancer` and
+      # `delete-target-group` to unblock it. Widened to 40 tries, 15
+      # seconds apart - 10 minutes total, generous enough to cover a
+      # real ALB deletion without needing to babysit this step by hand.
       - name: Wait for the ALB itself to actually disappear
         if: inputs.action == 'destroy'
         run: |
-          for i in $(seq 1 10); do
+          for i in $(seq 1 40); do
             COUNT=$(aws elbv2 describe-load-balancers \
               --query "length(LoadBalancers[?contains(LoadBalancerName, 'k8s-devops')])" \
               --output text 2>/dev/null || echo "0")
@@ -474,8 +475,25 @@ jobs:
               echo "ALB is gone."
               break
             fi
-            echo "Still waiting on the ALB to be deleted (attempt $i/10)..."
-            sleep 10
+            echo "Still waiting on the ALB to be deleted (attempt $i/40)..."
+            sleep 15
+          done
+
+      # Discovered on a real destroy run: the three per-environment
+      # Target Groups can outlive the ALB itself even once it's fully
+      # deleted - they're independent resources, not automatically
+      # cleaned up just because the load balancer that referenced them
+      # is gone. Deleting them explicitly here, rather than assuming
+      # the controller already handled it, avoids leaving orphaned
+      # Target Groups behind after every destroy.
+      - name: Delete any leftover Target Groups
+        if: inputs.action == 'destroy'
+        run: |
+          for tg in $(aws elbv2 describe-target-groups \
+            --query "TargetGroups[?contains(TargetGroupName, 'k8s-dev') || contains(TargetGroupName, 'k8s-staging') || contains(TargetGroupName, 'k8s-producti')].TargetGroupArn" \
+            --output text); do
+            echo "Deleting target group: $tg"
+            aws elbv2 delete-target-group --target-group-arn "$tg" || true
           done
 
       # Stacks come down in the exact reverse order they went up in.
