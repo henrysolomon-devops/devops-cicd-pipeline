@@ -432,8 +432,21 @@ jobs:
 
       # Needed even for destroy - deleting the Ingress resources below
       # requires cluster access, same as everything else in this file.
+      # continue-on-error here is what makes the destroy path
+      # idempotent. Discovered after a previous destroy run succeeded
+      # but was left running/re-triggered - this step failed outright
+      # with "No cluster found," halting the job before it ever
+      # reached the (already-unnecessary, but harmless to attempt)
+      # stack deletions below. Every step after this one already
+      # tolerates a missing cluster on its own (kubectl calls use
+      # --ignore-not-found or `|| true`, and CloudFormation's own
+      # delete-stack/wait commands are no-ops against a stack that's
+      # already gone), so letting this one step fail without stopping
+      # the job is enough to make a repeated or redundant destroy run
+      # safe rather than a hard failure.
       - name: Write a kubeconfig for the existing cluster
         if: inputs.action == 'destroy'
+        continue-on-error: true
         run: |
           aws eks update-kubeconfig \
             --name "${{ env.EKS_CLUSTER_NAME }}" \
