@@ -509,6 +509,36 @@ jobs:
             aws elbv2 delete-target-group --target-group-arn "$tg" || true
           done
 
+      # The AWS Load Balancer Controller creates its own security
+      # groups directly against the VPC (the ALB's own SG, and a
+      # shared backend SG for traffic between the ALB and the Pods it
+      # targets) - neither one is a CloudFormation resource, so nothing
+      # above this step ever cleans them up. Discovered the hard way:
+      # with the ALB and Target Groups already gone, these two
+      # leftover security groups were still attached to the VPC and
+      # blocked network-stack's own deletion with a generic
+      # "has dependent resources" error, needing a manual
+      # describe/delete cycle to unblock. Filtering by VPC ID and name
+      # pattern here, rather than deleting all non-default groups in
+      # the VPC, avoids ever touching GrafanaNodePortSecurityGroup or
+      # anything else CloudFormation still owns and will clean up on
+      # its own a few steps down.
+      - name: Delete the Load Balancer Controller's own security groups
+        if: inputs.action == 'destroy'
+        run: |
+          VPC_ID=$(aws cloudformation describe-stacks \
+            --stack-name devops-pipeline-network \
+            --query "Stacks[0].Outputs[?OutputKey=='VpcId'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+          if [ -n "$VPC_ID" ]; then
+            for sg in $(aws ec2 describe-security-groups \
+              --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=k8s-*" \
+              --query "SecurityGroups[].GroupId" --output text); do
+              echo "Deleting Load Balancer Controller security group: $sg"
+              aws ec2 delete-security-group --group-id "$sg" || true
+            done
+          fi
+
       # Stacks come down in the exact reverse order they went up in.
       # The IRSA stack has to go first, specifically because it imports
       # the EKS cluster stack's OIDC provider ARN - CloudFormation won't
